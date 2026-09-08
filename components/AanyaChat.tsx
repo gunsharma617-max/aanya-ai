@@ -6,12 +6,6 @@ import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 
 import {
-  speak,
-  stopSpeaking,
-  isSynthesisSupported,
-} from "@/lib/speech";
-
-import {
   speakWithGemini,
   stopGeminiSpeaking,
 } from "@/lib/gemini-tts";
@@ -34,10 +28,9 @@ export default function AanyaChat() {
   const [error, setError] = useState<string | null>(null);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
 
-  const voiceSupported = isSynthesisSupported();
-
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // Load saved voice preference
   useEffect(() => {
     const saved = localStorage.getItem(VOICE_PREF_KEY);
 
@@ -46,6 +39,7 @@ export default function AanyaChat() {
     }
   }, []);
 
+  // Save voice preference
   useEffect(() => {
     localStorage.setItem(
       VOICE_PREF_KEY,
@@ -53,11 +47,11 @@ export default function AanyaChat() {
     );
 
     if (!voiceEnabled) {
-      stopSpeaking();
       stopGeminiSpeaking();
     }
   }, [voiceEnabled]);
 
+  // Auto scroll
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
@@ -65,9 +59,9 @@ export default function AanyaChat() {
     });
   }, [messages, isLoading]);
 
+  // Stop voice when component unmounts
   useEffect(() => {
     return () => {
-      stopSpeaking();
       stopGeminiSpeaking();
     };
   }, []);
@@ -75,8 +69,7 @@ export default function AanyaChat() {
   async function handleSend(text: string) {
     setError(null);
 
-    // Stop any previous Aanya voice
-    stopSpeaking();
+    // Stop previous Gemini voice
     stopGeminiSpeaking();
 
     const userMessage: ChatMessageType = {
@@ -112,32 +105,42 @@ export default function AanyaChat() {
             error: FALLBACK_ERROR,
           }));
 
-        throw new Error(body.error || FALLBACK_ERROR);
+        throw new Error(
+          body.error || FALLBACK_ERROR
+        );
       }
 
       const data: ChatResponseBody = await res.json();
 
+      const assistantMessage: ChatMessageType = {
+        id: createMessageId(),
+        role: "assistant",
+        content: data.message.content,
+        createdAt: Date.now(),
+      };
+
       setMessages((prev) => [
         ...prev,
-        {
-          id: createMessageId(),
-          role: "assistant",
-          content: data.message.content,
-          createdAt: Date.now(),
-        },
+        assistantMessage,
       ]);
 
       // ==============================
-      // AANYA GEMINI TTS
+      // GEMINI TTS — LEDA
       // ==============================
 
       if (voiceEnabled) {
         speakWithGemini(
           data.message.content,
           "Leda"
-        ).catch(() => {
-          // Gemini TTS failed → browser voice fallback
-          speak(data.message.content);
+        ).catch((error) => {
+          console.error(
+            "Aanya Gemini TTS failed:",
+            error
+          );
+
+          setError(
+            "Aanya's Gemini voice could not be played."
+          );
         });
       }
     } catch (err) {
@@ -153,7 +156,10 @@ export default function AanyaChat() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-2xl flex-col">
+
+      {/* HEADER */}
       <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-6">
+
         <div className="flex items-center gap-3">
           <Image
             src="/aanya/avatar.svg"
@@ -175,61 +181,63 @@ export default function AanyaChat() {
           </div>
         </div>
 
-        {voiceSupported && (
-          <button
-            type="button"
-            onClick={() =>
-              setVoiceEnabled((v) => !v)
-            }
-            aria-label={
-              voiceEnabled
-                ? "Mute Aanya's voice"
-                : "Unmute Aanya's voice"
-            }
-            className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] text-[var(--text-muted)]"
-          >
-            {voiceEnabled ? (
-              <svg
-                width="17"
-                height="17"
-                viewBox="0 0 24 24"
-                fill="none"
-              >
-                <path
-                  d="M4 9v6h4l5 4V5L8 9H4z"
-                  fill="currentColor"
-                />
+        {/* VOICE BUTTON */}
 
-                <path
-                  d="M16 8a5 5 0 010 8"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </svg>
-            ) : (
-              <svg
-                width="17"
-                height="17"
-                viewBox="0 0 24 24"
-                fill="none"
-              >
-                <path
-                  d="M4 9v6h4l5 4V5L8 9H4z"
-                  fill="currentColor"
-                />
+        <button
+          type="button"
+          onClick={() =>
+            setVoiceEnabled((v) => !v)
+          }
+          aria-label={
+            voiceEnabled
+              ? "Mute Aanya's voice"
+              : "Unmute Aanya's voice"
+          }
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] text-[var(--text-muted)]"
+        >
+          {voiceEnabled ? (
+            <svg
+              width="17"
+              height="17"
+              viewBox="0 0 24 24"
+              fill="none"
+            >
+              <path
+                d="M4 9v6h4l5 4V5L8 9H4z"
+                fill="currentColor"
+              />
 
-                <path
-                  d="M16 9l5 6M21 9l-5 6"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </svg>
-            )}
-          </button>
-        )}
+              <path
+                d="M16 8a5 5 0 010 8"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              />
+            </svg>
+          ) : (
+            <svg
+              width="17"
+              height="17"
+              viewBox="0 0 24 24"
+              fill="none"
+            >
+              <path
+                d="M4 9v6h4l5 4V5L8 9H4z"
+                fill="currentColor"
+              />
+
+              <path
+                d="M16 9l5 6M21 9l-5 6"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              />
+            </svg>
+          )}
+        </button>
       </header>
+
+      {/* CHAT */}
 
       <div
         ref={scrollRef}
@@ -255,6 +263,8 @@ export default function AanyaChat() {
         )}
       </div>
 
+      {/* INPUT */}
+
       <ChatInput
         onSend={handleSend}
         disabled={isLoading}
@@ -263,9 +273,14 @@ export default function AanyaChat() {
   );
 }
 
+/* ==============================
+   WELCOME STATE
+================================ */
+
 function WelcomeState() {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 py-14 text-center">
+
       <Image
         src="/aanya/avatar.svg"
         alt="Aanya"
@@ -281,13 +296,19 @@ function WelcomeState() {
       <p className="max-w-xs text-[14.5px] text-[var(--text-muted)]">
         I&apos;m Aanya. What are we working on today?
       </p>
+
     </div>
   );
 }
 
+/* ==============================
+   TYPING INDICATOR
+================================ */
+
 function TypingIndicator() {
   return (
     <div className="flex items-center gap-2.5">
+
       <Image
         src="/aanya/avatar.svg"
         alt="Aanya"
@@ -297,10 +318,14 @@ function TypingIndicator() {
       />
 
       <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface-raised)] px-4 py-3.5">
+
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+
       </div>
     </div>
   );
-}
+          }
