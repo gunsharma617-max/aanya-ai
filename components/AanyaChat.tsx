@@ -79,7 +79,10 @@ export default function AanyaChat() {
       createdAt: Date.now(),
     };
 
-    const nextMessages = [...messages, userMessage];
+    const nextMessages = [
+      ...messages,
+      userMessage,
+    ];
 
     setMessages(nextMessages);
     setIsLoading(true);
@@ -99,9 +102,8 @@ export default function AanyaChat() {
       });
 
       if (!res.ok) {
-        const body: ChatErrorBody = await res
-          .json()
-          .catch(() => ({
+        const body: ChatErrorBody =
+          await res.json().catch(() => ({
             error: FALLBACK_ERROR,
           }));
 
@@ -110,7 +112,8 @@ export default function AanyaChat() {
         );
       }
 
-      const data: ChatResponseBody = await res.json();
+      const data: ChatResponseBody =
+        await res.json();
 
       const assistantMessage: ChatMessageType = {
         id: createMessageId(),
@@ -158,9 +161,11 @@ export default function AanyaChat() {
     <div className="mx-auto flex h-full w-full max-w-2xl flex-col">
 
       {/* HEADER */}
+
       <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-6">
 
         <div className="flex items-center gap-3">
+
           <Image
             src="/aanya/avatar.svg"
             alt="Aanya"
@@ -170,15 +175,21 @@ export default function AanyaChat() {
           />
 
           <div className="flex flex-col leading-tight">
+
             <span className="font-display text-[17px] font-medium text-[var(--text)]">
               Aanya
             </span>
 
             <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
+
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+
               Ready
+
             </span>
+
           </div>
+
         </div>
 
         {/* VOICE BUTTON */}
@@ -195,6 +206,7 @@ export default function AanyaChat() {
           }
           className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] text-[var(--text-muted)]"
         >
+
           {voiceEnabled ? (
             <svg
               width="17"
@@ -234,7 +246,9 @@ export default function AanyaChat() {
               />
             </svg>
           )}
+
         </button>
+
       </header>
 
       {/* CHAT */}
@@ -243,6 +257,7 @@ export default function AanyaChat() {
         ref={scrollRef}
         className="flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6"
       >
+
         {messages.length === 0 && (
           <WelcomeState />
         )}
@@ -254,22 +269,26 @@ export default function AanyaChat() {
           />
         ))}
 
-        {isLoading && <TypingIndicator />}
+        {isLoading && (
+          <TypingIndicator />
+        )}
 
         {error && (
           <div className="mx-auto max-w-[85%] rounded-xl border border-[var(--danger)]/30 bg-[var(--danger-soft)] px-4 py-2.5 text-center text-[13.5px] text-[var(--text)]">
             {error}
           </div>
         )}
+
       </div>
 
       {/* INPUT */}
 
       <ChatInput
-  onSend={handleSend}
-  disabled={isLoading}
-  wakeWordEnabled={true}
-   />
+        onSend={handleSend}
+        disabled={isLoading}
+        wakeWordEnabled={true}
+      />
+
     </div>
   );
 }
@@ -327,6 +346,7 @@ function TypingIndicator() {
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
 
       </div>
+
     </div>
   );
-          }
+        }
