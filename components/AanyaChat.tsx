@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
+import { speak, stopSpeaking, isSynthesisSupported } from "@/lib/speech";
 import {
   createMessageId,
   type ChatMessage as ChatMessageType,
@@ -13,12 +14,25 @@ import {
 
 const FALLBACK_ERROR =
   "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.";
+const VOICE_PREF_KEY = "aanya-voice-enabled";
 
 export default function AanyaChat() {
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const voiceSupported = isSynthesisSupported();
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(VOICE_PREF_KEY);
+    if (saved !== null) setVoiceEnabled(saved === "true");
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(VOICE_PREF_KEY, String(voiceEnabled));
+    if (!voiceEnabled) stopSpeaking();
+  }, [voiceEnabled]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -27,8 +41,13 @@ export default function AanyaChat() {
     });
   }, [messages, isLoading]);
 
+  useEffect(() => {
+    return () => stopSpeaking();
+  }, []);
+
   async function handleSend(text: string) {
     setError(null);
+    stopSpeaking();
 
     const userMessage: ChatMessageType = {
       id: createMessageId(),
@@ -69,6 +88,8 @@ export default function AanyaChat() {
           createdAt: Date.now(),
         },
       ]);
+
+      if (voiceEnabled) speak(data.message.content);
     } catch (err) {
       setError(err instanceof Error ? err.message : FALLBACK_ERROR);
     } finally {
@@ -78,23 +99,59 @@ export default function AanyaChat() {
 
   return (
     <div className="mx-auto flex h-full w-full max-w-2xl flex-col">
-      <header className="flex items-center gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-6">
-        <Image
-          src="/aanya/avatar.svg"
-          alt="Aanya"
-          width={38}
-          height={38}
-          className="h-[38px] w-[38px] rounded-full"
-        />
-        <div className="flex flex-col leading-tight">
-          <span className="font-display text-[17px] font-medium text-[var(--text)]">
-            Aanya
-          </span>
-          <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            Ready
-          </span>
+      <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-6">
+        <div className="flex items-center gap-3">
+          <Image
+            src="/aanya/avatar.svg"
+            alt="Aanya"
+            width={38}
+            height={38}
+            className="h-[38px] w-[38px] rounded-full"
+          />
+          <div className="flex flex-col leading-tight">
+            <span className="font-display text-[17px] font-medium text-[var(--text)]">
+              Aanya
+            </span>
+            <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              Ready
+            </span>
+          </div>
         </div>
+
+        {voiceSupported && (
+          <button
+            type="button"
+            onClick={() => setVoiceEnabled((v) => !v)}
+            aria-label={voiceEnabled ? "Mute Aanya's voice" : "Unmute Aanya's voice"}
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] text-[var(--text-muted)]"
+          >
+            {voiceEnabled ? (
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+                <path
+                  d="M4 9v6h4l5 4V5L8 9H4z"
+                  fill="currentColor"
+                />
+                <path
+                  d="M16 8a5 5 0 010 8"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+            ) : (
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+                <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor" />
+                <path
+                  d="M16 9l5 6M21 9l-5 6"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              </svg>
+            )}
+          </button>
+        )}
       </header>
 
       <div
