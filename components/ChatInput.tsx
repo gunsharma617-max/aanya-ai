@@ -22,16 +22,15 @@ interface RecognitionResultEvent {
   results: ArrayLike<ArrayLike<{ transcript: string }>>;
 }
 
-type Mode = "idle" | "wake" | "command";
-
-const WAKE_PHRASE = "hey aanya";
+type ListeningMode = "idle" | "wake" | "command";
 
 export default function ChatInput({
   onSend,
-  disabled,
+  disabled = false,
 }: ChatInputProps) {
   const [value, setValue] = useState("");
-  const [mode, setMode] = useState<Mode>("idle");
+  const [mode, setMode] =
+    useState<ListeningMode>("idle");
 
   const [recognitionLang, setRecognitionLang] =
     useState<RecognitionLang>("en-IN");
@@ -42,14 +41,17 @@ export default function ChatInput({
   const recognizerRef =
     useRef<ReturnType<typeof createRecognizer>>(null);
 
+  const wakeModeRef =
+    useRef(false);
+
+  const commandRef =
+    useRef("");
+
   const silenceTimerRef =
     useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const wakeEnabledRef =
-    useRef(false);
-
-  const commandTextRef =
-    useRef("");
+  const restartTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const startingRef =
     useRef(false);
@@ -62,8 +64,10 @@ export default function ChatInput({
    */
   useEffect(() => {
     return () => {
-      wakeEnabledRef.current = false;
+      wakeModeRef.current = false;
+
       clearSilenceTimer();
+      clearRestartTimer();
 
       try {
         recognizerRef.current?.stop();
@@ -73,25 +77,34 @@ export default function ChatInput({
     };
   }, []);
 
+  /*
+   * Helpers
+   */
+
   function clearSilenceTimer() {
     if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
+      clearTimeout(
+        silenceTimerRef.current
+      );
+
       silenceTimerRef.current = null;
     }
   }
 
-  function resetInput() {
-    setValue("");
-    commandTextRef.current = "";
+  function clearRestartTimer() {
+    if (restartTimerRef.current) {
+      clearTimeout(
+        restartTimerRef.current
+      );
 
-    requestAnimationFrame(() => {
-      if (textareaRef.current) {
-        textareaRef.current.style.height = "auto";
-      }
-    });
+      restartTimerRef.current = null;
+    }
   }
 
-  function stopRecognizer() {
+  function stopRecognition() {
+    clearRestartTimer();
+    clearSilenceTimer();
+
     try {
       recognizerRef.current?.stop();
     } catch {}
@@ -100,59 +113,93 @@ export default function ChatInput({
     startingRef.current = false;
   }
 
-  /*
-   * SEND COMMAND
-   */
-  function sendCommand(text: string) {
-    const trimmed = text.trim();
+  function resetText() {
+    setValue("");
+    commandRef.current = "";
 
-    if (!trimmed || disabled) {
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.style.height =
+          "auto";
+      }
+    });
+  }
+
+  /*
+   * Automatically send voice command
+   */
+  function autoSend(text: string) {
+    const message = text.trim();
+
+    if (!message || disabled) {
       return;
     }
 
     clearSilenceTimer();
-    stopRecognizer();
+    stopRecognition();
 
     setMode(
-      wakeEnabledRef.current
+      wakeModeRef.current
         ? "wake"
         : "idle"
     );
 
-    resetInput();
+    resetText();
 
-    onSend(trimmed);
+    onSend(message);
+
+    /*
+     * If wake mode is enabled,
+     * start listening again after Aanya
+     * has received the command.
+     */
+    if (wakeModeRef.current) {
+      restartTimerRef.current =
+        setTimeout(() => {
+          startWakeListener();
+        }, 700);
+    }
   }
 
   /*
-   * START COMMAND LISTENING
+   * Manual command listener
+   *
+   * Mic button → speak → automatic send
    */
-  function startCommandListening() {
+  function startCommandListener() {
     if (!micSupported || disabled) {
       return;
     }
 
+    clearRestartTimer();
     clearSilenceTimer();
-    stopRecognizer();
 
-    commandTextRef.current = "";
+    try {
+      recognizerRef.current?.stop();
+    } catch {}
+
+    recognizerRef.current = null;
+
+    commandRef.current = "";
 
     setValue("");
     setMode("command");
 
     const recognizer =
-      createRecognizer(recognitionLang);
+      createRecognizer(
+        recognitionLang
+      );
 
     if (!recognizer) {
       setMode("idle");
       return;
     }
 
-    // Command can listen continuously
     recognizer.continuous = false;
     recognizer.interimResults = false;
 
-    recognizerRef.current = recognizer;
+    recognizerRef.current =
+      recognizer;
 
     recognizer.onresult = (
       event: unknown
@@ -168,62 +215,79 @@ export default function ChatInput({
       const transcript =
         last?.[0]?.transcript?.trim() ?? "";
 
-      if (!transcript) return;
+      if (!transcript) {
+        return;
+      }
 
-      commandTextRef.current =
-        commandTextRef.current
-          ? `${commandTextRef.current} ${transcript}`
-          : transcript;
+      commandRef.current =
+        transcript;
 
-      setValue(commandTextRef.current);
+      setValue(transcript);
 
+      /*
+       * Speech recognition has returned text.
+       *
+       * Wait a little so the UI can show the
+       * transcript, then automatically send.
+       */
       clearSilenceTimer();
 
       silenceTimerRef.current =
         setTimeout(() => {
-          sendCommand(
-            commandTextRef.current
+          autoSend(
+            commandRef.current
           );
-        }, 1200);
+        }, 900);
     };
 
     recognizer.onerror = (event) => {
       console.error(
-        "Command recognition error:",
+        "Aanya command recognition error:",
         event
       );
 
       clearSilenceTimer();
 
-      stopRecognizer();
+      recognizerRef.current = null;
 
-      if (wakeEnabledRef.current) {
-        setMode("wake");
-        startWakeListener();
-      } else {
-        setMode("idle");
-      }
+      setMode(
+        wakeModeRef.current
+          ? "wake"
+          : "idle"
+      );
     };
 
     recognizer.onend = () => {
       recognizerRef.current = null;
 
+      /*
+       * Sometimes Chrome ends recognition
+       * immediately after returning the result.
+       *
+       * If text exists, send it automatically.
+       */
       if (
-        commandTextRef.current.trim()
+        commandRef.current.trim()
       ) {
         clearSilenceTimer();
 
         silenceTimerRef.current =
           setTimeout(() => {
-            sendCommand(
-              commandTextRef.current
+            autoSend(
+              commandRef.current
             );
-          }, 400);
-      } else if (
-        wakeEnabledRef.current
-      ) {
+          }, 300);
+
+        return;
+      }
+
+      if (wakeModeRef.current) {
         setMode("wake");
-        startWakeListener();
+
+        restartTimerRef.current =
+          setTimeout(() => {
+            startWakeListener();
+          }, 400);
       } else {
         setMode("idle");
       }
@@ -233,44 +297,48 @@ export default function ChatInput({
       recognizer.start();
     } catch (error) {
       console.error(
-        "Could not start command recognition:",
+        "Could not start microphone:",
         error
       );
 
-      stopRecognizer();
+      recognizerRef.current = null;
       setMode("idle");
     }
   }
 
   /*
-   * START WAKE-WORD LISTENER
+   * Wake-word listener
    */
   function startWakeListener() {
     if (
       !micSupported ||
       disabled ||
-      !wakeEnabledRef.current ||
-      startingRef.current ||
-      recognizerRef.current
+      !wakeModeRef.current ||
+      recognizerRef.current ||
+      startingRef.current
     ) {
       return;
     }
 
+    clearRestartTimer();
+
     startingRef.current = true;
 
     const recognizer =
-      createRecognizer(recognitionLang);
+      createRecognizer(
+        recognitionLang
+      );
 
     if (!recognizer) {
       startingRef.current = false;
       return;
     }
 
-    // Important: continuously listen for wake phrase
     recognizer.continuous = true;
     recognizer.interimResults = false;
 
-    recognizerRef.current = recognizer;
+    recognizerRef.current =
+      recognizer;
 
     recognizer.onresult = (
       event: unknown
@@ -285,22 +353,18 @@ export default function ChatInput({
       ) {
         const transcript =
           e.results[i]?.[0]?.transcript
-            ?.trim()
-            .toLowerCase() ?? "";
+            ?.toLowerCase()
+            .trim() ?? "";
 
-        if (!transcript) continue;
+        if (!transcript) {
+          continue;
+        }
 
         console.log(
-          "Wake listener heard:",
+          "Wake listener:",
           transcript
         );
 
-        /*
-         * Detect:
-         * "hey aanya"
-         * "hey anya"
-         * "hey ania"
-         */
         const normalized =
           transcript
             .replace(/[.,!?]/g, "")
@@ -309,7 +373,7 @@ export default function ChatInput({
 
         const wakeDetected =
           normalized.includes(
-            WAKE_PHRASE
+            "hey aanya"
           ) ||
           normalized.includes(
             "hey anya"
@@ -318,33 +382,41 @@ export default function ChatInput({
             "hey ania"
           );
 
-        if (wakeDetected) {
-          console.log(
-            "🔥 Hey Aanya detected"
-          );
-
-          stopRecognizer();
-
-          wakeEnabledRef.current =
-            true;
-
-          setMode("command");
-
-          /*
-           * Give recognition a tiny moment
-           * before starting command capture.
-           */
-          setTimeout(() => {
-            if (
-              wakeEnabledRef.current &&
-              !disabled
-            ) {
-              startCommandListening();
-            }
-          }, 250);
-
-          return;
+        if (!wakeDetected) {
+          continue;
         }
+
+        console.log(
+          "🔥 Hey Aanya detected"
+        );
+
+        /*
+         * Stop wake listener
+         */
+        try {
+          recognizer.stop();
+        } catch {}
+
+        recognizerRef.current = null;
+
+        /*
+         * Switch to command mode
+         */
+        setMode("command");
+
+        /*
+         * Start command recognition
+         */
+        setTimeout(() => {
+          if (
+            wakeModeRef.current &&
+            !disabled
+          ) {
+            startCommandListener();
+          }
+        }, 350);
+
+        return;
       }
     };
 
@@ -354,16 +426,16 @@ export default function ChatInput({
         event
       );
 
-      stopRecognizer();
+      recognizerRef.current = null;
+      startingRef.current = false;
 
       if (
-        wakeEnabledRef.current
+        wakeModeRef.current
       ) {
-        setMode("wake");
-
-        setTimeout(() => {
-          startWakeListener();
-        }, 800);
+        restartTimerRef.current =
+          setTimeout(() => {
+            startWakeListener();
+          }, 800);
       }
     };
 
@@ -372,15 +444,16 @@ export default function ChatInput({
       startingRef.current = false;
 
       /*
-       * Browser recognition can stop automatically.
-       * Restart it while Wake Mode is enabled.
+       * Browser recognition sometimes stops
+       * automatically. Restart wake mode.
        */
       if (
-        wakeEnabledRef.current
+        wakeModeRef.current
       ) {
-        setTimeout(() => {
-          startWakeListener();
-        }, 300);
+        restartTimerRef.current =
+          setTimeout(() => {
+            startWakeListener();
+          }, 500);
       }
     };
 
@@ -396,86 +469,113 @@ export default function ChatInput({
         error
       );
 
-      stopRecognizer();
-
-      if (
-        wakeEnabledRef.current
-      ) {
-        setMode("wake");
-      }
+      recognizerRef.current = null;
+      startingRef.current = false;
+      setMode("idle");
     }
   }
 
   /*
-   * TOGGLE WAKE MODE
+   * Wake mode toggle
    */
   function toggleWakeMode() {
     if (!micSupported || disabled) {
       return;
     }
 
-    if (wakeEnabledRef.current) {
-      wakeEnabledRef.current = false;
+    /*
+     * Turn OFF
+     */
+    if (wakeModeRef.current) {
+      wakeModeRef.current = false;
 
-      clearSilenceTimer();
-      stopRecognizer();
+      stopRecognition();
 
       setMode("idle");
 
       return;
     }
 
-    wakeEnabledRef.current = true;
+    /*
+     * Turn ON
+     */
+    wakeModeRef.current = true;
+
+    setMode("wake");
 
     startWakeListener();
   }
 
   /*
-   * MANUAL MIC
+   * Manual microphone button
    */
-  function handleManualMic() {
+  function handleMic() {
     if (!micSupported || disabled) {
       return;
     }
 
+    /*
+     * If already listening,
+     * stop and automatically send
+     * whatever was recognized.
+     */
     if (mode === "command") {
-      sendCommand(
-        commandTextRef.current
-      );
+      if (
+        commandRef.current.trim()
+      ) {
+        autoSend(
+          commandRef.current
+        );
+      } else {
+        stopRecognition();
+
+        setMode(
+          wakeModeRef.current
+            ? "wake"
+            : "idle"
+        );
+      }
+
       return;
     }
 
-    startCommandListening();
+    startCommandListener();
   }
 
   /*
-   * NORMAL SEND
+   * Normal text send
    */
   function handleSend() {
-    const trimmed = value.trim();
+    const trimmed =
+      value.trim();
 
     if (!trimmed || disabled) {
       return;
     }
 
-    clearSilenceTimer();
-    stopRecognizer();
+    stopRecognition();
+
+    setMode(
+      wakeModeRef.current
+        ? "wake"
+        : "idle"
+    );
+
+    resetText();
 
     onSend(trimmed);
 
-    resetInput();
-
-    if (wakeEnabledRef.current) {
-      setMode("wake");
-
-      setTimeout(() => {
-        startWakeListener();
-      }, 500);
-    } else {
-      setMode("idle");
+    if (wakeModeRef.current) {
+      restartTimerRef.current =
+        setTimeout(() => {
+          startWakeListener();
+        }, 700);
     }
   }
 
+  /*
+   * Keyboard
+   */
   function handleKeyDown(
     e: KeyboardEvent<HTMLTextAreaElement>
   ) {
@@ -484,25 +584,36 @@ export default function ChatInput({
       !e.shiftKey
     ) {
       e.preventDefault();
+
       handleSend();
     }
   }
 
+  /*
+   * Text input
+   */
   function handleInput(
     e: React.ChangeEvent<HTMLTextAreaElement>
   ) {
-    setValue(e.target.value);
+    const text =
+      e.target.value;
+
+    setValue(text);
 
     requestAnimationFrame(() => {
-      const el = textareaRef.current;
+      const element =
+        textareaRef.current;
 
-      if (!el) return;
+      if (!element) {
+        return;
+      }
 
-      el.style.height = "auto";
+      element.style.height =
+        "auto";
 
-      el.style.height =
+      element.style.height =
         `${Math.min(
-          el.scrollHeight,
+          element.scrollHeight,
           140
         )}px`;
     });
@@ -511,18 +622,25 @@ export default function ChatInput({
   return (
     <div className="flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg)] px-3 py-3 sm:px-6">
 
-      {/* STATUS */}
+      {/* STATUS + LANGUAGE */}
 
       {micSupported && (
         <div className="flex items-center justify-between gap-2">
 
           <div className="flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]">
 
+            {mode === "idle" && (
+              <span>
+                Voice ready
+              </span>
+            )}
+
             {mode === "wake" && (
               <>
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+
                 <span>
-                  Hey Aanya mode ON
+                  Hey Aanya ON
                 </span>
               </>
             )}
@@ -530,16 +648,11 @@ export default function ChatInput({
             {mode === "command" && (
               <>
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-400" />
+
                 <span>
                   Aanya sun rahi hai...
                 </span>
               </>
-            )}
-
-            {mode === "idle" && (
-              <span>
-                Wake word OFF
-              </span>
             )}
 
           </div>
@@ -611,17 +724,19 @@ export default function ChatInput({
           className="max-h-[140px] flex-1 resize-none rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-[15px] text-[var(--text)] placeholder:text-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
         />
 
-        {/* WAKE WORD BUTTON */}
+        {/* WAKE BUTTON */}
 
         {micSupported && (
           <button
             type="button"
-            onClick={toggleWakeMode}
+            onClick={
+              toggleWakeMode
+            }
             disabled={disabled}
             aria-label={
-              wakeEnabledRef.current
-                ? "Disable Hey Aanya"
-                : "Enable Hey Aanya"
+              wakeModeRef.current
+                ? "Turn off Hey Aanya"
+                : "Turn on Hey Aanya"
             }
             className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-all disabled:cursor-not-allowed disabled:opacity-35 ${
               mode === "wake"
@@ -635,19 +750,17 @@ export default function ChatInput({
           </button>
         )}
 
-        {/* MANUAL MIC */}
+        {/* MIC BUTTON */}
 
         {micSupported && (
           <button
             type="button"
-            onClick={
-              handleManualMic
-            }
+            onClick={handleMic}
             disabled={disabled}
             aria-label={
               mode === "command"
                 ? "Stop listening"
-                : "Speak your message"
+                : "Speak to Aanya"
             }
             className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
               mode === "command"
@@ -656,7 +769,7 @@ export default function ChatInput({
             }`}
           >
             {mode === "command" ? (
-              <span className="typing-dot h-2.5 w-2.5 rounded-full bg-white" />
+              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-white" />
             ) : (
               <svg
                 width="18"
@@ -681,7 +794,7 @@ export default function ChatInput({
           </button>
         )}
 
-        {/* SEND */}
+        {/* SEND BUTTON */}
 
         <button
           type="button"
@@ -709,4 +822,4 @@ export default function ChatInput({
       </div>
     </div>
   );
-}
+    }
