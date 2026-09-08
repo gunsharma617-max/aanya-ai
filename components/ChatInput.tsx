@@ -292,6 +292,12 @@ export default function ChatInput({
     startCommandListening();
   }
 
+  function clearInput() {
+    if (disabled) return;
+    resetInput();
+    textareaRef.current?.focus();
+  }
+
   function startWakeListener() {
     if (
       !wakeWordEnabled ||
@@ -453,89 +459,88 @@ export default function ChatInput({
     disabled,
   ]);
 
+  const hasText = value.trim().length > 0;
+
   return (
-    <div className="border-t border-white/[0.06] bg-[#090b10]/95 px-3 py-3 backdrop-blur-xl sm:px-6">
-      
-      {/* WAKE STATUS */}
+    <div className="border-t border-[var(--border-soft)] bg-[var(--surface-glass)] px-3 pt-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] backdrop-blur-xl sm:px-6">
+
+      {/* WAKE STATUS + WAVE */}
 
       {micSupported && (
-        <div className="mb-2.5 flex items-center justify-end gap-2 px-1 text-[11px] text-[var(--text-muted)]">
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              isListening
-                ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.7)]"
-                : isWakeListening
-                ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]"
-                : "bg-zinc-600"
-            }`}
-          />
-
-          <span>
+        <div className="mb-2.5 flex items-center justify-between gap-3 rounded-full border border-[var(--border-soft)] bg-white/[0.02] px-3.5 py-2">
+          <span className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]">
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                isListening
+                  ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.7)]"
+                  : isWakeListening
+                  ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]"
+                  : "bg-zinc-600"
+              }`}
+            />
             {isListening
               ? "Aanya sun rahi hai..."
               : isWakeListening
               ? '"Hey Aanya" active'
               : "Wake word off"}
           </span>
+
+          <span className="flex h-4 items-end gap-[3px]">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <span
+                key={i}
+                className={`wave-bar w-[3px] rounded-full ${
+                  isListening
+                    ? "h-4 bg-red-400"
+                    : isWakeListening
+                    ? "h-3.5 bg-[var(--cyan)]"
+                    : "wave-bar-idle h-2 bg-zinc-700"
+                }`}
+              />
+            ))}
+          </span>
         </div>
       )}
 
-      {/* LANGUAGE */}
-
-      {micSupported && (
-        <div className="mb-2.5 flex items-center justify-end gap-1.5 px-1 text-[11px] text-[var(--text-muted)]">
-          <span>Language</span>
-
-          <button
-            type="button"
-            onClick={() =>
-              setRecognitionLang("en-IN")
-            }
-            className={`rounded-full px-2.5 py-1 transition ${
-              recognitionLang === "en-IN"
-                ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                : "text-[var(--text-muted)] hover:text-white"
-            }`}
-          >
-            EN
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
-              setRecognitionLang("hi-IN")
-            }
-            className={`rounded-full px-2.5 py-1 transition ${
-              recognitionLang === "hi-IN"
-                ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                : "text-[var(--text-muted)] hover:text-white"
-            }`}
-          >
-            HI
-          </button>
-        </div>
-      )}
-
-      {/* MAIN INPUT */}
+      {/* MAIN INPUT PILL */}
 
       <div
         className="
           flex items-end gap-1.5
-          rounded-[22px]
-          border border-white/[0.08]
-          bg-[#12151c]/95
+          rounded-[24px]
+          border border-[var(--border-strong)]
+          bg-[var(--surface-raised)]/95
           p-1.5
           shadow-[0_12px_40px_rgba(0,0,0,0.35)]
           transition
-          focus-within:border-[rgba(232,184,92,0.35)]
-          focus-within:shadow-[0_0_0_1px_rgba(232,184,92,0.08),0_12px_40px_rgba(0,0,0,0.4)]
+          focus-within:border-[rgba(232,184,92,0.4)]
+          focus-within:shadow-[0_0_0_1px_rgba(232,184,92,0.1),0_12px_40px_rgba(0,0,0,0.4)]
         "
       >
 
+        {/* CLEAR / PLUS */}
+
+        <button
+          type="button"
+          onClick={clearInput}
+          disabled={!hasText || disabled}
+          aria-label="Clear input"
+          className="flex h-9 w-9 shrink-0 items-center justify-center self-center rounded-full text-[var(--text-dim)] transition hover:bg-white/[0.05] hover:text-[var(--text)] disabled:opacity-30"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+            <path
+              d={hasText ? "M6 6l12 12M18 6L6 18" : "M12 5v14M5 12h14"}
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
+
         {/* @ ICON */}
 
-        <div className="flex h-11 w-9 shrink-0 items-center justify-center text-[#697282]">
-          <span className="text-[18px] font-medium">@</span>
+        <div className="flex h-11 w-6 shrink-0 items-center justify-center text-[var(--text-dim)]">
+          <span className="text-[16px] font-medium">@</span>
         </div>
 
         {/* TEXTAREA */}
@@ -550,7 +555,7 @@ export default function ChatInput({
           placeholder={
             isListening
               ? "Aanya sun rahi hai..."
-              : "Message Aanya..."
+              : "Command Aanya..."
           }
           aria-label="Message Aanya"
           className="
@@ -563,24 +568,12 @@ export default function ChatInput({
             py-2.5
             text-[15px]
             leading-5
-            text-[#f5f7fa]
-            placeholder:text-[#697282]
+            text-[var(--text)]
+            placeholder:text-[var(--text-dim)]
             focus:outline-none
             disabled:opacity-50
           "
         />
-
-        {/* AGENT */}
-
-        <div className="hidden shrink-0 items-center rounded-full border border-white/[0.07] bg-white/[0.035] px-3 py-1.5 text-[11px] text-[#8b93a3] sm:flex">
-          Agent
-        </div>
-
-        {/* AUTO */}
-
-        <div className="hidden shrink-0 items-center rounded-full border border-white/[0.07] bg-white/[0.035] px-3 py-1.5 text-[11px] text-[#8b93a3] sm:flex">
-          Auto
-        </div>
 
         {/* MICROPHONE */}
 
@@ -604,8 +597,8 @@ export default function ChatInput({
 
               ${
                 isListening
-                  ? "border-red-400/30 bg-red-400/15 text-red-300 shadow-[0_0_18px_rgba(248,113,113,0.12)]"
-                  : "border-white/[0.08] bg-white/[0.035] text-[#a0a8b7] hover:border-white/[0.14] hover:bg-white/[0.06] hover:text-white"
+                  ? "border-red-400/30 bg-red-400/15 text-red-300 shadow-[0_0_18px_rgba(248,113,113,0.18)]"
+                  : "border-[var(--gold-soft)] bg-white/[0.03] text-[var(--gold)] hover:bg-[var(--gold-soft)] hover:shadow-[0_0_14px_rgba(232,184,92,0.2)]"
               }
             `}
           >
@@ -648,9 +641,9 @@ export default function ChatInput({
             flex h-11 w-11 shrink-0
             items-center justify-center
             rounded-full
-            bg-[var(--accent)]
+            bg-[var(--gold)]
             text-[#17130b]
-            shadow-[0_4px_16px_rgba(232,184,92,0.18)]
+            shadow-[0_4px_16px_rgba(232,184,92,0.22)]
             transition-all
             hover:brightness-110
             active:scale-95
@@ -672,6 +665,69 @@ export default function ChatInput({
           </svg>
         </button>
       </div>
+
+      {/* META ROW: language + agent/auto + hint */}
+
+      {micSupported && (
+        <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 px-1">
+
+          {/* LANGUAGE */}
+          <div className="flex items-center gap-1 rounded-full border border-[var(--border-soft)] bg-white/[0.02] px-1.5 py-1">
+            <span className="flex h-6 w-6 items-center justify-center text-[var(--text-dim)]">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
+                <path d="M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z" stroke="currentColor" strokeWidth="1.6" />
+              </svg>
+            </span>
+
+            <button
+              type="button"
+              onClick={() => setRecognitionLang("en-IN")}
+              className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+                recognitionLang === "en-IN"
+                  ? "bg-[var(--gold-soft)] text-[var(--gold)]"
+                  : "text-[var(--text-muted)] hover:text-white"
+              }`}
+            >
+              EN
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setRecognitionLang("hi-IN")}
+              className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+                recognitionLang === "hi-IN"
+                  ? "bg-[var(--gold-soft)] text-[var(--gold)]"
+                  : "text-[var(--text-muted)] hover:text-white"
+              }`}
+            >
+              HI
+            </button>
+          </div>
+
+          {/* AGENT / AUTO */}
+          <div className="flex items-center gap-1.5 rounded-full border border-[var(--border-soft)] bg-white/[0.02] px-3 py-1.5 text-[11px] text-[var(--text-muted)]">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+              <rect x="5" y="8" width="14" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M12 8V5M9 5h6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              <circle cx="9.5" cy="13" r="1" fill="currentColor" />
+              <circle cx="14.5" cy="13" r="1" fill="currentColor" />
+            </svg>
+            Agent
+            <span className="opacity-30">·</span>
+            Auto
+          </div>
+
+          {/* HINT */}
+          <span className="hidden items-center gap-1.5 text-[10.5px] text-[var(--text-dim)] sm:flex">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+              <rect x="3" y="6" width="18" height="12" rx="2" stroke="currentColor" strokeWidth="1.5" />
+              <path d="M6.5 10h.01M9.5 10h.01M12.5 10h.01M15.5 10h.01M6.5 13.5h11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            Enter to send · Shift+Enter for new line
+          </span>
+        </div>
+      )}
     </div>
   );
-  }
+            }
