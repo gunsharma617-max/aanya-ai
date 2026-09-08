@@ -14,23 +14,27 @@ export async function speakWithGemini(
   text: string,
   voice = "Leda"
 ): Promise<void> {
-  if (!text.trim()) return;
+  if (!text.trim()) {
+    return;
+  }
 
+  // Stop previous voice
   stopGeminiSpeaking();
 
   const context = getAudioContext();
 
-  // Helps mobile browsers allow audio playback
-  // after the user interacts with Aanya.
+  // Resume audio context on mobile browsers
   if (context.state === "suspended") {
     await context.resume();
   }
 
   const response = await fetch("/api/tts", {
     method: "POST",
+
     headers: {
       "Content-Type": "application/json",
     },
+
     body: JSON.stringify({
       text,
       voice,
@@ -38,18 +42,35 @@ export async function speakWithGemini(
   });
 
   if (!response.ok) {
-    throw new Error("Gemini TTS request failed.");
+    const errorText = await response.text();
+
+    throw new Error(
+      `Gemini TTS failed: ${response.status} ${errorText}`
+    );
   }
 
-  const audioData = await response.arrayBuffer();
+  const audioData =
+    await response.arrayBuffer();
+
+  if (!audioData.byteLength) {
+    throw new Error(
+      "Gemini returned empty audio."
+    );
+  }
 
   const audioBuffer =
-    await context.decodeAudioData(audioData);
+    await context.decodeAudioData(
+      audioData
+    );
 
-  const source = context.createBufferSource();
+  const source =
+    context.createBufferSource();
 
   source.buffer = audioBuffer;
-  source.connect(context.destination);
+
+  source.connect(
+    context.destination
+  );
 
   currentSource = source;
 
@@ -63,14 +84,17 @@ export async function speakWithGemini(
 }
 
 export function stopGeminiSpeaking(): void {
-  if (currentSource) {
-    try {
-      currentSource.stop();
-    } catch {
-      // Already stopped.
-    }
-
-    currentSource.disconnect();
-    currentSource = null;
+  if (!currentSource) {
+    return;
   }
+
+  try {
+    currentSource.stop();
+  } catch {
+    // Already stopped.
+  }
+
+  currentSource.disconnect();
+
+  currentSource = null;
 }
