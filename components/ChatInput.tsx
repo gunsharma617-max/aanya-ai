@@ -46,9 +46,8 @@ export default function ChatInput({
     ReturnType<typeof createRecognizer>
   >(null);
 
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
+  const silenceTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const wakeRestartTimerRef =
     useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -56,7 +55,6 @@ export default function ChatInput({
   const transcriptRef = useRef("");
 
   const commandModeRef = useRef(false);
-
   const wakeDetectedRef = useRef(false);
 
   const micSupported = isRecognitionSupported();
@@ -125,7 +123,6 @@ export default function ChatInput({
       return;
     }
 
-    // Stop wake listener while Aanya is listening for the command.
     stopWakeListener();
 
     try {
@@ -188,7 +185,6 @@ export default function ChatInput({
       commandModeRef.current = false;
       setIsListening(false);
 
-      // Wake listener will restart automatically.
       if (wakeWordEnabled && !disabled) {
         setTimeout(() => {
           startWakeListener();
@@ -253,14 +249,18 @@ export default function ChatInput({
     resetInput();
   }
 
-  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+  function handleKeyDown(
+    e: KeyboardEvent<HTMLTextAreaElement>
+  ) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
   }
 
-  function handleInput(e: ChangeEvent<HTMLTextAreaElement>) {
+  function handleInput(
+    e: ChangeEvent<HTMLTextAreaElement>
+  ) {
     setValue(e.target.value);
 
     requestAnimationFrame(() => {
@@ -366,8 +366,6 @@ export default function ChatInput({
 
       stopWakeListener();
 
-      // Small delay gives Chrome time to
-      // release the first recognition session.
       setTimeout(() => {
         wakeDetectedRef.current = false;
         startCommandListening();
@@ -456,18 +454,19 @@ export default function ChatInput({
   ]);
 
   return (
-    <div className="border-t border-[#1d1d1f] bg-[#0d0d0f] px-4 py-3 sm:px-6">
-      {/* WAKE WORD STATUS */}
+    <div className="border-t border-white/[0.06] bg-[#090b10]/95 px-3 py-3 backdrop-blur-xl sm:px-6">
+      
+      {/* WAKE STATUS */}
 
       {micSupported && (
-        <div className="mb-2 flex items-center justify-end gap-2 text-[11px] text-[var(--text-muted)]">
+        <div className="mb-2.5 flex items-center justify-end gap-2 px-1 text-[11px] text-[var(--text-muted)]">
           <span
             className={`h-1.5 w-1.5 rounded-full ${
               isListening
-                ? "bg-red-500"
+                ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.7)]"
                 : isWakeListening
-                ? "bg-emerald-400"
-                : "bg-[var(--text-muted)]"
+                ? "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)]"
+                : "bg-zinc-600"
             }`}
           />
 
@@ -475,7 +474,7 @@ export default function ChatInput({
             {isListening
               ? "Aanya sun rahi hai..."
               : isWakeListening
-              ? 'Wake word active — "Hey Aanya"'
+              ? '"Hey Aanya" active'
               : "Wake word off"}
           </span>
         </div>
@@ -484,18 +483,18 @@ export default function ChatInput({
       {/* LANGUAGE */}
 
       {micSupported && (
-        <div className="mb-2 flex items-center gap-1.5 self-end text-[11px] text-[var(--text-muted)]">
-          <span>Bolne ki language:</span>
+        <div className="mb-2.5 flex items-center justify-end gap-1.5 px-1 text-[11px] text-[var(--text-muted)]">
+          <span>Language</span>
 
           <button
             type="button"
             onClick={() =>
               setRecognitionLang("en-IN")
             }
-            className={`rounded-full px-2 py-0.5 ${
+            className={`rounded-full px-2.5 py-1 transition ${
               recognitionLang === "en-IN"
                 ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                : ""
+                : "text-[var(--text-muted)] hover:text-white"
             }`}
           >
             EN
@@ -506,10 +505,10 @@ export default function ChatInput({
             onClick={() =>
               setRecognitionLang("hi-IN")
             }
-            className={`rounded-full px-2 py-0.5 ${
+            className={`rounded-full px-2.5 py-1 transition ${
               recognitionLang === "hi-IN"
                 ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                : ""
+                : "text-[var(--text-muted)] hover:text-white"
             }`}
           >
             HI
@@ -517,13 +516,26 @@ export default function ChatInput({
         </div>
       )}
 
-      {/* INPUT */}
+      {/* MAIN INPUT */}
 
-      <div className="flex items-end gap-2 rounded-[20px] border border-[#29292d] bg-[#1d1d1d] p-2 shadow-2xl">
-        {/* AT ICON */}
+      <div
+        className="
+          flex items-end gap-1.5
+          rounded-[22px]
+          border border-white/[0.08]
+          bg-[#12151c]/95
+          p-1.5
+          shadow-[0_12px_40px_rgba(0,0,0,0.35)]
+          transition
+          focus-within:border-[rgba(232,184,92,0.35)]
+          focus-within:shadow-[0_0_0_1px_rgba(232,184,92,0.08),0_12px_40px_rgba(0,0,0,0.4)]
+        "
+      >
 
-        <div className="flex h-11 w-10 shrink-0 items-center justify-center text-[var(--text-muted)]">
-          <span className="text-lg font-medium">@</span>
+        {/* @ ICON */}
+
+        <div className="flex h-11 w-9 shrink-0 items-center justify-center text-[#697282]">
+          <span className="text-[18px] font-medium">@</span>
         </div>
 
         {/* TEXTAREA */}
@@ -538,21 +550,35 @@ export default function ChatInput({
           placeholder={
             isListening
               ? "Aanya sun rahi hai..."
-              : "Message Aanya…"
+              : "Message Aanya..."
           }
           aria-label="Message Aanya"
-          className="max-h-[140px] min-h-[44px] flex-1 resize-none bg-transparent px-1 py-2.5 text-[15px] text-[var(--text)] placeholder:text-[var(--text-muted)] focus-visible:outline-none disabled:opacity-50"
+          className="
+            max-h-[140px]
+            min-h-[44px]
+            flex-1
+            resize-none
+            bg-transparent
+            px-1
+            py-2.5
+            text-[15px]
+            leading-5
+            text-[#f5f7fa]
+            placeholder:text-[#697282]
+            focus:outline-none
+            disabled:opacity-50
+          "
         />
 
         {/* AGENT */}
 
-        <div className="hidden shrink-0 items-center rounded-full border border-[#343438] bg-[#242426] px-3 py-1.5 text-[11px] text-[var(--text-muted)] sm:flex">
+        <div className="hidden shrink-0 items-center rounded-full border border-white/[0.07] bg-white/[0.035] px-3 py-1.5 text-[11px] text-[#8b93a3] sm:flex">
           Agent
         </div>
 
         {/* AUTO */}
 
-        <div className="hidden shrink-0 items-center rounded-full border border-[#343438] bg-[#242426] px-3 py-1.5 text-[11px] text-[var(--text-muted)] sm:flex">
+        <div className="hidden shrink-0 items-center rounded-full border border-white/[0.07] bg-white/[0.035] px-3 py-1.5 text-[11px] text-[#8b93a3] sm:flex">
           Auto
         </div>
 
@@ -568,14 +594,23 @@ export default function ChatInput({
                 ? "Stop listening"
                 : "Speak your message"
             }
-            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-              isListening
-                ? "border-transparent bg-red-500 text-white"
-                : "border-[#343438] bg-[#242426] text-[var(--text-muted)] hover:bg-[#2b2b2e]"
-            }`}
+            className={`
+              flex h-11 w-11 shrink-0 items-center justify-center
+              rounded-full
+              border
+              transition-all
+              disabled:cursor-not-allowed
+              disabled:opacity-35
+
+              ${
+                isListening
+                  ? "border-red-400/30 bg-red-400/15 text-red-300 shadow-[0_0_18px_rgba(248,113,113,0.12)]"
+                  : "border-white/[0.08] bg-white/[0.035] text-[#a0a8b7] hover:border-white/[0.14] hover:bg-white/[0.06] hover:text-white"
+              }
+            `}
           >
             {isListening ? (
-              <span className="typing-dot h-2.5 w-2.5 rounded-full bg-white" />
+              <span className="typing-dot h-2.5 w-2.5 rounded-full bg-red-300" />
             ) : (
               <svg
                 width="18"
@@ -609,7 +644,20 @@ export default function ChatInput({
             disabled || !value.trim()
           }
           aria-label="Send message"
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[#1c1424] transition-opacity disabled:cursor-not-allowed disabled:opacity-35"
+          className="
+            flex h-11 w-11 shrink-0
+            items-center justify-center
+            rounded-full
+            bg-[var(--accent)]
+            text-[#17130b]
+            shadow-[0_4px_16px_rgba(232,184,92,0.18)]
+            transition-all
+            hover:brightness-110
+            active:scale-95
+            disabled:cursor-not-allowed
+            disabled:opacity-25
+            disabled:shadow-none
+          "
         >
           <svg
             width="19"
@@ -626,4 +674,4 @@ export default function ChatInput({
       </div>
     </div>
   );
-}
+  }
