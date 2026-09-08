@@ -13,6 +13,8 @@ import {
   type RecognitionLang,
 } from "@/lib/speech";
 
+import { BorderBeam } from "border-beam";
+
 interface ChatInputProps {
   onSend: (text: string) => void;
   disabled?: boolean;
@@ -35,32 +37,30 @@ export default function ChatInput({
   const [recognitionLang, setRecognitionLang] =
     useState<RecognitionLang>("en-IN");
 
-  const textareaRef =
-    useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const recognizerRef =
-    useRef<ReturnType<typeof createRecognizer>>(null);
+  const recognizerRef = useRef<
+    ReturnType<typeof createRecognizer>
+  >(null);
 
-  const wakeRecognizerRef =
-    useRef<ReturnType<typeof createRecognizer>>(null);
+  const wakeRecognizerRef = useRef<
+    ReturnType<typeof createRecognizer>
+  >(null);
 
-  const silenceTimerRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
 
   const wakeRestartTimerRef =
     useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const transcriptRef =
-    useRef("");
+  const transcriptRef = useRef("");
 
-  const commandModeRef =
-    useRef(false);
+  const commandModeRef = useRef(false);
 
-  const wakeDetectedRef =
-    useRef(false);
+  const wakeDetectedRef = useRef(false);
 
-  const micSupported =
-    isRecognitionSupported();
+  const micSupported = isRecognitionSupported();
 
   function clearSilenceTimer() {
     if (silenceTimerRef.current) {
@@ -101,8 +101,7 @@ export default function ChatInput({
   function sendVoiceMessage() {
     clearSilenceTimer();
 
-    const text =
-      transcriptRef.current.trim();
+    const text = transcriptRef.current.trim();
 
     if (!text || disabled) {
       return;
@@ -143,8 +142,7 @@ export default function ChatInput({
     setValue("");
     setIsListening(true);
 
-    const recognizer =
-      createRecognizer(recognitionLang);
+    const recognizer = createRecognizer(recognitionLang);
 
     if (!recognizer) {
       commandModeRef.current = false;
@@ -152,48 +150,34 @@ export default function ChatInput({
       return;
     }
 
-    recognizerRef.current =
-      recognizer;
+    recognizerRef.current = recognizer;
 
-    recognizer.onresult = (
-      event: unknown
-    ) => {
-      const e =
-        event as RecognitionResultEvent;
+    recognizer.onresult = (event: unknown) => {
+      const e = event as RecognitionResultEvent;
 
-      const last =
-        e.results[
-          e.results.length - 1
-        ];
+      const last = e.results[e.results.length - 1];
 
       const transcript =
-        last?.[0]?.transcript
-          ?.trim() ?? "";
+        last?.[0]?.transcript?.trim() ?? "";
 
       if (!transcript) {
         return;
       }
 
-      transcriptRef.current =
-        transcriptRef.current
-          ? `${transcriptRef.current} ${transcript}`
-          : transcript;
+      transcriptRef.current = transcriptRef.current
+        ? `${transcriptRef.current} ${transcript}`
+        : transcript;
 
-      setValue(
-        transcriptRef.current
-      );
+      setValue(transcriptRef.current);
 
       clearSilenceTimer();
 
-      silenceTimerRef.current =
-        setTimeout(() => {
-          sendVoiceMessage();
-        }, 1200);
+      silenceTimerRef.current = setTimeout(() => {
+        sendVoiceMessage();
+      }, 1200);
     };
 
-    recognizer.onerror = (
-      event: unknown
-    ) => {
+    recognizer.onerror = (event: unknown) => {
       console.error(
         "Aanya command recognition error:",
         event
@@ -206,10 +190,7 @@ export default function ChatInput({
       setIsListening(false);
 
       // Wake listener will restart automatically.
-      if (
-        wakeWordEnabled &&
-        !disabled
-      ) {
+      if (wakeWordEnabled && !disabled) {
         setTimeout(() => {
           startWakeListener();
         }, 500);
@@ -217,24 +198,18 @@ export default function ChatInput({
     };
 
     recognizer.onend = () => {
-      if (
-        transcriptRef.current.trim()
-      ) {
+      if (transcriptRef.current.trim()) {
         clearSilenceTimer();
 
-        silenceTimerRef.current =
-          setTimeout(() => {
-            sendVoiceMessage();
-          }, 500);
+        silenceTimerRef.current = setTimeout(() => {
+          sendVoiceMessage();
+        }, 500);
       } else {
         recognizerRef.current = null;
         commandModeRef.current = false;
         setIsListening(false);
 
-        if (
-          wakeWordEnabled &&
-          !disabled
-        ) {
+        if (wakeWordEnabled && !disabled) {
           setTimeout(() => {
             startWakeListener();
           }, 500);
@@ -257,8 +232,7 @@ export default function ChatInput({
   }
 
   function handleSend() {
-    const trimmed =
-      value.trim();
+    const trimmed = value.trim();
 
     if (!trimmed || disabled) {
       return;
@@ -280,13 +254,8 @@ export default function ChatInput({
     resetInput();
   }
 
-  function handleKeyDown(
-    e: KeyboardEvent<HTMLTextAreaElement>
-  ) {
-    if (
-      e.key === "Enter" &&
-      !e.shiftKey
-    ) {
+  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
 
       handleSend();
@@ -299,8 +268,7 @@ export default function ChatInput({
     setValue(e.target.value);
 
     requestAnimationFrame(() => {
-      const el =
-        textareaRef.current;
+      const el = textareaRef.current;
 
       if (!el) {
         return;
@@ -308,19 +276,15 @@ export default function ChatInput({
 
       el.style.height = "auto";
 
-      el.style.height =
-        `${Math.min(
-          el.scrollHeight,
-          140
-        )}px`;
+      el.style.height = `${Math.min(
+        el.scrollHeight,
+        140
+      )}px`;
     });
   }
 
   function handleMicToggle() {
-    if (
-      !micSupported ||
-      disabled
-    ) {
+    if (!micSupported || disabled) {
       return;
     }
 
@@ -348,8 +312,7 @@ export default function ChatInput({
       wakeRecognizerRef.current?.stop();
     } catch {}
 
-    const recognizer =
-      createRecognizer("en-IN");
+    const recognizer = createRecognizer("en-IN");
 
     if (!recognizer) {
       return;
@@ -358,14 +321,11 @@ export default function ChatInput({
     recognizer.continuous = true;
     recognizer.interimResults = true;
 
-    wakeRecognizerRef.current =
-      recognizer;
+    wakeRecognizerRef.current = recognizer;
 
     setIsWakeListening(true);
 
-    recognizer.onresult = (
-      event: unknown
-    ) => {
+    recognizer.onresult = (event: unknown) => {
       if (
         commandModeRef.current ||
         wakeDetectedRef.current
@@ -373,56 +333,40 @@ export default function ChatInput({
         return;
       }
 
-      const e =
-        event as RecognitionResultEvent;
+      const e = event as RecognitionResultEvent;
 
       let transcript = "";
 
-      for (
-        let i = 0;
-        i < e.results.length;
-        i++
-      ) {
-        const result =
-          e.results[i];
+      for (let i = 0; i < e.results.length; i++) {
+        const result = e.results[i];
 
-        const speech =
-          result?.[0]?.transcript;
+        const speech = result?.[0]?.transcript;
 
         if (speech) {
-          transcript +=
-            ` ${speech}`;
+          transcript += ` ${speech}`;
         }
       }
 
-      const normalized =
-        transcript
-          .toLowerCase()
-          .replace(/[.,!?]/g, "")
-          .trim();
+      const normalized = transcript
+        .toLowerCase()
+        .replace(/[.,!?]/g, "")
+        .trim();
 
       const wakeDetected =
-        normalized.includes(
-          "hey aanya"
-        ) ||
-        normalized.includes(
-          "hey anya"
-        ) ||
-        normalized.includes(
-          "hey ania"
-        );
+        normalized.includes("hey aanya") ||
+        normalized.includes("hey anya") ||
+        normalized.includes("hey ania");
 
       if (!wakeDetected) {
         return;
       }
 
       console.log(
-        'Aanya wake word detected:',
+        "Aanya wake word detected:",
         normalized
       );
 
-      wakeDetectedRef.current =
-        true;
+      wakeDetectedRef.current = true;
 
       stopWakeListener();
 
@@ -430,24 +374,18 @@ export default function ChatInput({
       // time to release the first
       // recognition session.
       setTimeout(() => {
-        wakeDetectedRef.current =
-          false;
-
+        wakeDetectedRef.current = false;
         startCommandListening();
       }, 250);
     };
 
-    recognizer.onerror = (
-      event: unknown
-    ) => {
+    recognizer.onerror = (event: unknown) => {
       console.log(
         "Wake listener error:",
         event
       );
 
-      wakeRecognizerRef.current =
-        null;
-
+      wakeRecognizerRef.current = null;
       setIsWakeListening(false);
 
       if (
@@ -455,16 +393,14 @@ export default function ChatInput({
         !disabled &&
         !commandModeRef.current
       ) {
-        wakeRestartTimerRef.current =
-          setTimeout(() => {
-            startWakeListener();
-          }, 1000);
+        wakeRestartTimerRef.current = setTimeout(() => {
+          startWakeListener();
+        }, 1000);
       }
     };
 
     recognizer.onend = () => {
-      wakeRecognizerRef.current =
-        null;
+      wakeRecognizerRef.current = null;
 
       setIsWakeListening(false);
 
@@ -474,10 +410,9 @@ export default function ChatInput({
         !commandModeRef.current &&
         !wakeDetectedRef.current
       ) {
-        wakeRestartTimerRef.current =
-          setTimeout(() => {
-            startWakeListener();
-          }, 500);
+        wakeRestartTimerRef.current = setTimeout(() => {
+          startWakeListener();
+        }, 500);
       }
     };
 
@@ -493,9 +428,7 @@ export default function ChatInput({
         error
       );
 
-      wakeRecognizerRef.current =
-        null;
-
+      wakeRecognizerRef.current = null;
       setIsWakeListening(false);
     }
   }
@@ -518,8 +451,7 @@ export default function ChatInput({
         recognizerRef.current?.stop();
       } catch {}
 
-      recognizerRef.current =
-        null;
+      recognizerRef.current = null;
 
       clearSilenceTimer();
     };
@@ -530,178 +462,160 @@ export default function ChatInput({
   ]);
 
   return (
-    <div className="flex flex-col gap-2 border-t border-[var(--border)] bg-[var(--bg)] px-3 py-3 sm:px-6">
+    <div className="border-t border-[#1d1d1f] bg-[#0d0d0f] px-3 py-4 sm:px-6">
+      <div className="relative mx-auto flex w-full max-w-2xl flex-col gap-3 overflow-hidden rounded-[20px] border border-[#29292d] bg-[#1d1d1f] p-3 shadow-2xl">
 
-      {/* WAKE WORD STATUS */}
-
-      {micSupported && (
-        <div className="flex items-center justify-end gap-2 text-[11px] text-[var(--text-muted)]">
-
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              isListening
-                ? "bg-red-500"
-                : isWakeListening
-                ? "bg-emerald-400"
-                : "bg-[var(--text-muted)]"
-            }`}
-          />
-
-          <span>
-            {isListening
-              ? "Aanya sun rahi hai..."
-              : isWakeListening
-              ? 'Wake word active — "Hey Aanya"'
-              : "Wake word off"}
-          </span>
-
-        </div>
-      )}
-
-      {/* LANGUAGE */}
-
-      {micSupported && (
-        <div className="flex items-center gap-1.5 self-end text-[11px] text-[var(--text-muted)]">
-
-          <span>
-            Bolne ki language:
-          </span>
-
-          <button
-            type="button"
-            onClick={() =>
-              setRecognitionLang(
-                "en-IN"
-              )
-            }
-            className={`rounded-full px-2 py-0.5 ${
-              recognitionLang ===
-              "en-IN"
-                ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                : ""
-            }`}
-          >
-            EN
-          </button>
-
-          <button
-            type="button"
-            onClick={() =>
-              setRecognitionLang(
-                "hi-IN"
-              )
-            }
-            className={`rounded-full px-2 py-0.5 ${
-              recognitionLang ===
-              "hi-IN"
-                ? "bg-[var(--accent-soft)] text-[var(--accent)]"
-                : ""
-            }`}
-          >
-            HI
-          </button>
-
-        </div>
-      )}
-
-      {/* INPUT */}
-
-      <div className="flex items-end gap-2">
-
-        <textarea
-          ref={textareaRef}
-          value={value}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          disabled={disabled}
-          rows={1}
-          placeholder={
-            isListening
-              ? "Aanya sun rahi hai..."
-              : "Message Aanya…"
-          }
-          aria-label="Message Aanya"
-          className="max-h-[140px] flex-1 resize-none rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-[15px] text-[var(--text)] placeholder:text-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
+        {/* COLORFUL BORDER BEAM */}
+        <BorderBeam
+          size="md"
+          colorVariant="colorful"
         />
 
-        {/* MICROPHONE */}
-
+        {/* WAKE WORD STATUS */}
         {micSupported && (
-          <button
-            type="button"
-            onClick={
-              handleMicToggle
-            }
-            disabled={disabled}
-            aria-label={
-              isListening
-                ? "Stop listening"
-                : "Speak your message"
-            }
-            className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
-              isListening
-                ? "border-transparent bg-red-500 text-white"
-                : "border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)]"
-            }`}
-          >
+          <div className="flex items-center justify-end gap-2 text-[11px] text-[var(--text-muted)]">
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                isListening
+                  ? "bg-red-500"
+                  : isWakeListening
+                  ? "bg-emerald-400"
+                  : "bg-[var(--text-muted)]"
+              }`}
+            />
 
-            {isListening ? (
-              <span className="typing-dot h-2.5 w-2.5 rounded-full bg-white" />
-            ) : (
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-              >
-                <path
-                  d="M12 15a3 3 0 003-3V6a3 3 0 10-6 0v6a3 3 0 003 3z"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                />
-
-                <path
-                  d="M19 11a7 7 0 01-14 0M12 18v3"
-                  stroke="currentColor"
-                  strokeWidth="1.8"
-                  strokeLinecap="round"
-                />
-              </svg>
-            )}
-
-          </button>
+            <span>
+              {isListening
+                ? "Aanya sun rahi hai..."
+                : isWakeListening
+                ? 'Wake word active — "Hey Aanya"'
+                : "Wake word off"}
+            </span>
+          </div>
         )}
 
-        {/* SEND */}
+        {/* LANGUAGE */}
+        {micSupported && (
+          <div className="flex items-center gap-1.5 self-end text-[11px] text-[var(--text-muted)]">
+            <span>
+              Bolne ki language:
+            </span>
 
-        <button
-          type="button"
-          onClick={
-            handleSend
-          }
-          disabled={
-            disabled ||
-            !value.trim()
-          }
-          aria-label="Send message"
-          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[#1c1424] transition-opacity disabled:cursor-not-allowed disabled:opacity-35"
-        >
+            <button
+              type="button"
+              onClick={() =>
+                setRecognitionLang("en-IN")
+              }
+              className={`rounded-full px-2 py-0.5 ${
+                recognitionLang === "en-IN"
+                  ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : ""
+              }`}
+            >
+              EN
+            </button>
 
-          <svg
-            width="19"
-            height="19"
-            viewBox="0 0 24 24"
-            fill="none"
+            <button
+              type="button"
+              onClick={() =>
+                setRecognitionLang("hi-IN")
+              }
+              className={`rounded-full px-2 py-0.5 ${
+                recognitionLang === "hi-IN"
+                  ? "bg-[var(--accent-soft)] text-[var(--accent)]"
+                  : ""
+              }`}
+            >
+              HI
+            </button>
+          </div>
+        )}
+
+        {/* INPUT */}
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={handleInput}
+            onKeyDown={handleKeyDown}
+            disabled={disabled}
+            rows={1}
+            placeholder={
+              isListening
+                ? "Aanya sun rahi hai..."
+                : "Message Aanya…"
+            }
+            aria-label="Message Aanya"
+            className="max-h-[140px] flex-1 resize-none rounded-2xl border border-[#29292d] bg-[#0d0d0f] px-4 py-2.5 text-[15px] text-[var(--text)] placeholder:text-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
+          />
+
+          {/* MICROPHONE */}
+          {micSupported && (
+            <button
+              type="button"
+              onClick={handleMicToggle}
+              disabled={disabled}
+              aria-label={
+                isListening
+                  ? "Stop listening"
+                  : "Speak your message"
+              }
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-35 ${
+                isListening
+                  ? "border-transparent bg-red-500 text-white"
+                  : "border-[#29292d] bg-[#0d0d0f] text-[var(--text-muted)]"
+              }`}
+            >
+              {isListening ? (
+                <span className="typing-dot h-2.5 w-2.5 rounded-full bg-white" />
+              ) : (
+                <svg
+                  width="18"
+                  height="18"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                >
+                  <path
+                    d="M12 15a3 3 0 003-3V6a3 3 0 10-6 0v6a3 3 0 003 3z"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                  />
+
+                  <path
+                    d="M19 11a7 7 0 01-14 0M12 18v3"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              )}
+            </button>
+          )}
+
+          {/* SEND */}
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={
+              disabled || !value.trim()
+            }
+            aria-label="Send message"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[#1c1424] transition-opacity disabled:cursor-not-allowed disabled:opacity-35"
           >
-            <path
-              d="M4 12L20 4L13 20L11 13L4 12Z"
-              fill="currentColor"
-            />
-          </svg>
-
-        </button>
-
+            <svg
+              width="19"
+              height="19"
+              viewBox="0 0 24 24"
+              fill="none"
+            >
+              <path
+                d="M4 12L20 4L13 20L11 13L4 12Z"
+                fill="currentColor"
+              />
+            </svg>
+          </button>
+        </div>
       </div>
     </div>
   );
-}
+      }
