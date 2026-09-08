@@ -4,7 +4,7 @@ import type { ChatRequestBody, ChatResponseBody, ChatErrorBody } from "@/lib/aan
 
 export const runtime = "nodejs";
 
-const DEFAULT_MODEL = "gemini-2.0-flash";
+const DEFAULT_MODEL = "gemini-3.5-flash";
 const MAX_MESSAGE_LENGTH = 8000;
 const MAX_HISTORY = 40;
 
