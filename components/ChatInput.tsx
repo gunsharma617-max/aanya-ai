@@ -23,7 +23,7 @@ interface RecognitionResultEvent {
 
 export default function ChatInput({
   onSend,
-  disabled = false,
+  disabled,
 }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [isListening, setIsListening] =
@@ -38,15 +38,26 @@ export default function ChatInput({
   const recognizerRef =
     useRef<ReturnType<typeof createRecognizer>>(null);
 
-  const latestTranscriptRef =
+  const silenceTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const transcriptRef =
     useRef("");
 
   const micSupported =
     isRecognitionSupported();
 
+  function clearSilenceTimer() {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }
+
   function resetInput() {
     setValue("");
-    latestTranscriptRef.current = "";
+
+    transcriptRef.current = "";
 
     requestAnimationFrame(() => {
       if (textareaRef.current) {
@@ -56,206 +67,57 @@ export default function ChatInput({
     });
   }
 
-  function sendVoiceText(text: string) {
-    const message = text.trim();
+  function sendVoiceMessage() {
+    clearSilenceTimer();
 
-    if (!message || disabled) {
+    const text =
+      transcriptRef.current.trim();
+
+    if (!text || disabled) {
       return;
     }
 
-    console.log(
-      "AANYA AUTO SEND:",
-      message
-    );
-
+    // Stop recognition
     try {
       recognizerRef.current?.stop();
-    } catch {}
+    } catch {
+      // Already stopped
+    }
 
     recognizerRef.current = null;
+
     setIsListening(false);
 
+    // Clear input before sending
     resetInput();
 
-    onSend(message);
-  }
-
-  function startListening() {
-    if (!micSupported || disabled) {
-      return;
-    }
-
-    /*
-     * Stop any previous recognition
-     */
-    try {
-      recognizerRef.current?.stop();
-    } catch {}
-
-    recognizerRef.current = null;
-
-    latestTranscriptRef.current = "";
-
-    setValue("");
-    setIsListening(true);
-
-    const recognizer =
-      createRecognizer(
-        recognitionLang
-      );
-
-    if (!recognizer) {
-      setIsListening(false);
-      return;
-    }
-
-    recognizer.continuous = false;
-    recognizer.interimResults = false;
-
-    recognizerRef.current =
-      recognizer;
-
-    recognizer.onresult = (
-      event: unknown
-    ) => {
-      const e =
-        event as RecognitionResultEvent;
-
-      let finalText = "";
-
-      for (
-        let i = 0;
-        i < e.results.length;
-        i++
-      ) {
-        const transcript =
-          e.results[i]?.[0]?.transcript
-            ?.trim() ?? "";
-
-        if (transcript) {
-          finalText +=
-            (finalText ? " " : "") +
-            transcript;
-        }
-      }
-
-      finalText = finalText.trim();
-
-      if (!finalText) {
-        return;
-      }
-
-      console.log(
-        "AANYA SPEECH:",
-        finalText
-      );
-
-      latestTranscriptRef.current =
-        finalText;
-
-      setValue(finalText);
-
-      /*
-       * IMPORTANT:
-       *
-       * Do NOT wait for onend.
-       * Send directly when speech result
-       * arrives.
-       */
-      sendVoiceText(finalText);
-    };
-
-    recognizer.onerror = (
-      event: unknown
-    ) => {
-      console.error(
-        "Speech recognition error:",
-        event
-      );
-
-      setIsListening(false);
-
-      recognizerRef.current = null;
-    };
-
-    recognizer.onend = () => {
-      console.log(
-        "Speech recognition ended"
-      );
-
-      setIsListening(false);
-
-      recognizerRef.current = null;
-
-      /*
-       * Safety fallback:
-       * If result happened but sendVoiceText
-       * somehow didn't run, send it here.
-       */
-      const remaining =
-        latestTranscriptRef.current.trim();
-
-      if (remaining && !disabled) {
-        latestTranscriptRef.current =
-          "";
-
-        setValue("");
-
-        onSend(remaining);
-      }
-    };
-
-    try {
-      recognizer.start();
-
-      console.log(
-        "AANYA MICROPHONE STARTED"
-      );
-    } catch (error) {
-      console.error(
-        "Microphone start failed:",
-        error
-      );
-
-      recognizerRef.current = null;
-      setIsListening(false);
-    }
-  }
-
-  function stopListening() {
-    try {
-      recognizerRef.current?.stop();
-    } catch {}
-
-    recognizerRef.current = null;
-    setIsListening(false);
-  }
-
-  function handleMicToggle() {
-    if (disabled) {
-      return;
-    }
-
-    if (isListening) {
-      stopListening();
-      return;
-    }
-
-    startListening();
+    // Automatically send to Aanya
+    onSend(text);
   }
 
   function handleSend() {
-    const message =
-      value.trim();
+    const trimmed = value.trim();
 
-    if (!message || disabled) {
+    if (!trimmed || disabled) {
       return;
     }
 
-    stopListening();
-    resetInput();
+    // Stop microphone if active
+    clearSilenceTimer();
 
-    onSend(message);
+    try {
+      recognizerRef.current?.stop();
+    } catch {
+      // Already stopped
+    }
+
+    recognizerRef.current = null;
+
+    setIsListening(false);
+
+    onSend(trimmed);
+
+    resetInput();
   }
 
   function handleKeyDown(
@@ -266,6 +128,7 @@ export default function ChatInput({
       !e.shiftKey
     ) {
       e.preventDefault();
+
       handleSend();
     }
   }
@@ -273,28 +136,137 @@ export default function ChatInput({
   function handleInput(
     e: React.ChangeEvent<HTMLTextAreaElement>
   ) {
-    const text =
-      e.target.value;
-
-    setValue(text);
+    setValue(e.target.value);
 
     requestAnimationFrame(() => {
-      const element =
-        textareaRef.current;
+      const el = textareaRef.current;
 
-      if (!element) {
-        return;
-      }
+      if (!el) return;
 
-      element.style.height =
-        "auto";
+      el.style.height = "auto";
 
-      element.style.height =
+      el.style.height =
         `${Math.min(
-          element.scrollHeight,
+          el.scrollHeight,
           140
         )}px`;
     });
+  }
+
+  function handleMicToggle() {
+    if (!micSupported || disabled) {
+      return;
+    }
+
+    // Stop listening
+    if (isListening) {
+      sendVoiceMessage();
+      return;
+    }
+
+    const recognizer =
+      createRecognizer(
+        recognitionLang
+      );
+
+    if (!recognizer) {
+      return;
+    }
+
+    clearSilenceTimer();
+
+    transcriptRef.current = "";
+
+    setValue("");
+
+    recognizerRef.current =
+      recognizer;
+
+    recognizer.onresult = (
+      event: unknown
+    ) => {
+      const e =
+        event as RecognitionResultEvent;
+
+      const last =
+        e.results[
+          e.results.length - 1
+        ];
+
+      const transcript =
+        last?.[0]?.transcript
+          ?.trim() ?? "";
+
+      if (!transcript) {
+        return;
+      }
+
+      transcriptRef.current =
+        transcriptRef.current
+          ? `${transcriptRef.current} ${transcript}`
+          : transcript;
+
+      setValue(
+        transcriptRef.current
+      );
+
+      // Reset silence timer
+      clearSilenceTimer();
+
+      silenceTimerRef.current =
+        setTimeout(() => {
+          sendVoiceMessage();
+        }, 1200);
+    };
+
+    recognizer.onerror = (
+      event: unknown
+    ) => {
+      console.error(
+        "Aanya speech recognition error:",
+        event
+      );
+
+      clearSilenceTimer();
+
+      recognizerRef.current =
+        null;
+
+      setIsListening(false);
+    };
+
+    recognizer.onend = () => {
+      // If there is already speech text,
+      // automatically send it.
+      if (
+        transcriptRef.current.trim()
+      ) {
+        clearSilenceTimer();
+
+        silenceTimerRef.current =
+          setTimeout(() => {
+            sendVoiceMessage();
+          }, 500);
+      } else {
+        setIsListening(false);
+      }
+    };
+
+    setIsListening(true);
+
+    try {
+      recognizer.start();
+    } catch (error) {
+      console.error(
+        "Could not start microphone:",
+        error
+      );
+
+      recognizerRef.current =
+        null;
+
+      setIsListening(false);
+    }
   }
 
   return (
@@ -304,6 +276,7 @@ export default function ChatInput({
 
       {micSupported && (
         <div className="flex items-center gap-1.5 self-end text-[11px] text-[var(--text-muted)]">
+
           <span>
             Bolne ki language:
           </span>
@@ -341,10 +314,11 @@ export default function ChatInput({
           >
             HI
           </button>
+
         </div>
       )}
 
-      {/* INPUT */}
+      {/* INPUT AREA */}
 
       <div className="flex items-end gap-2">
 
@@ -364,7 +338,7 @@ export default function ChatInput({
           className="max-h-[140px] flex-1 resize-none rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2.5 text-[15px] text-[var(--text)] placeholder:text-[var(--text-muted)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] disabled:opacity-50"
         />
 
-        {/* MIC */}
+        {/* MICROPHONE */}
 
         {micSupported && (
           <button
@@ -384,8 +358,9 @@ export default function ChatInput({
                 : "border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)]"
             }`}
           >
+
             {isListening ? (
-              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-white" />
+              <span className="typing-dot h-2.5 w-2.5 rounded-full bg-white" />
             ) : (
               <svg
                 width="18"
@@ -407,6 +382,7 @@ export default function ChatInput({
                 />
               </svg>
             )}
+
           </button>
         )}
 
@@ -422,6 +398,7 @@ export default function ChatInput({
           aria-label="Send message"
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-[#1c1424] transition-opacity disabled:cursor-not-allowed disabled:opacity-35"
         >
+
           <svg
             width="19"
             height="19"
@@ -433,9 +410,10 @@ export default function ChatInput({
               fill="currentColor"
             />
           </svg>
+
         </button>
 
       </div>
     </div>
   );
-}
+                }
