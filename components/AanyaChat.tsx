@@ -266,9 +266,10 @@ export default function AanyaChat() {
       {/* INPUT */}
 
       <ChatInput
-        onSend={handleSend}
-        disabled={isLoading}
-      />
+  onSend={handleSend}
+  disabled={isLoading}
+  wakeWordEnabled={true}
+   />
     </div>
   );
 }
