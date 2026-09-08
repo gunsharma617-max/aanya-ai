@@ -4,8 +4,7 @@ import type { ChatRequestBody, ChatResponseBody, ChatErrorBody } from "@/lib/aan
 
 export const runtime = "nodejs";
 
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+const DEFAULT_MODEL = "gemini-2.0-flash";
 const MAX_MESSAGE_LENGTH = 8000;
 const MAX_HISTORY = 40;
 
@@ -13,7 +12,7 @@ const MAX_HISTORY = 40;
  * POST /api/chat
  *
  * Accepts the running conversation, prepends Aanya's system prompt,
- * forwards it to the configured AI provider, and returns the reply.
+ * forwards it to Gemini, and returns the reply.
  * The API key never leaves this server-side route.
  */
 export async function POST(req: NextRequest) {
@@ -40,22 +39,19 @@ export async function POST(req: NextRequest) {
   }
 
   const model = process.env.AI_MODEL?.trim() || DEFAULT_MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
   try {
-    const upstream = await fetch(ANTHROPIC_URL, {
+    const upstream = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        model,
-        max_tokens: 1024,
-        system: AANYA_SYSTEM_PROMPT,
-        messages: body.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
+        systemInstruction: {
+          parts: [{ text: AANYA_SYSTEM_PROMPT }],
+        },
+        contents: body.messages.map((m) => ({
+          role: m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.content }],
         })),
       }),
     });
@@ -123,21 +119,24 @@ function validateBody(
   return { ok: true };
 }
 
-/** Pulls the assistant's text out of an Anthropic Messages API response. */
+/** Pulls the assistant's text out of a Gemini generateContent response. */
 function extractText(data: unknown): string | null {
-  if (
-    !data ||
-    typeof data !== "object" ||
-    !Array.isArray((data as { content?: unknown }).content)
-  ) {
-    return null;
-  }
-  const blocks = (data as { content: { type: string; text?: string }[] }).content;
-  const text = blocks
-    .filter((b) => b.type === "text" && typeof b.text === "string")
-    .map((b) => b.text)
+  if (!data || typeof data !== "object") return null;
+  const candidates = (data as { candidates?: unknown }).candidates;
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+
+  const first = candidates[0] as {
+    content?: { parts?: { text?: string }[] };
+  };
+  const parts = first.content?.parts;
+  if (!Array.isArray(parts)) return null;
+
+  const text = parts
+    .map((p) => p.text)
+    .filter((t): t is string => typeof t === "string")
     .join("\n")
     .trim();
+
   return text.length > 0 ? text : null;
 }
 
