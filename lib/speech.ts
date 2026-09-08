@@ -1,12 +1,11 @@
 /**
  * Lightweight wrapper around the browser's built-in Web Speech APIs.
- * Both speech-to-text (recognition) and text-to-speech (synthesis) are
- * free, ship with the browser, and need no API key — quality depends
- * on the device/browser's own speech engine.
  *
- * Support varies: Android Chrome supports both well. iOS Safari does
- * not support SpeechRecognition (voice input), only SpeechSynthesis
- * (voice output).
+ * Speech recognition (voice input) and speech synthesis (voice output)
+ * are provided by the browser/device, so no separate voice API key is
+ * required.
+ *
+ * Android Chrome generally supports both APIs.
  */
 
 export type RecognitionLang = "hi-IN" | "en-IN";
@@ -31,59 +30,123 @@ declare global {
 
 export function isRecognitionSupported(): boolean {
   if (typeof window === "undefined") return false;
-  return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  return Boolean(
+    window.SpeechRecognition || window.webkitSpeechRecognition
+  );
 }
 
 export function createRecognizer(
   lang: RecognitionLang
 ): MinimalSpeechRecognition | null {
   if (typeof window === "undefined") return null;
-  const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+  const Ctor =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
+
   if (!Ctor) return null;
+
   const recognizer = new Ctor();
+
   recognizer.lang = lang;
   recognizer.continuous = false;
   recognizer.interimResults = false;
+
   return recognizer;
 }
 
 export function isSynthesisSupported(): boolean {
-  return typeof window !== "undefined" && "speechSynthesis" in window;
+  return (
+    typeof window !== "undefined" &&
+    "speechSynthesis" in window
+  );
 }
 
 const DEVANAGARI_RANGE = /[\u0900-\u097F]/;
 
-/** Rough guess at whether text is primarily Hindi (Devanagari script) or English/Hinglish (Latin script). */
-export function detectSpeechLang(text: string): RecognitionLang {
+/**
+ * Detect whether the text is primarily Hindi or English/Hinglish.
+ */
+export function detectSpeechLang(
+  text: string
+): RecognitionLang {
   return DEVANAGARI_RANGE.test(text) ? "hi-IN" : "en-IN";
 }
 
-function pickVoice(lang: RecognitionLang): SpeechSynthesisVoice | null {
+/**
+ * Select the best available voice for the requested language.
+ */
+function pickVoice(
+  lang: RecognitionLang
+): SpeechSynthesisVoice | null {
   const voices = window.speechSynthesis.getVoices();
-  if (voices.length === 0) return null;
-  const exact = voices.find((v) => v.lang === lang);
-  if (exact) return exact;
-  const prefix = lang.split("-")[0];
-  const partial = voices.find((v) => v.lang.startsWith(prefix));
-  return partial ?? voices[0] ?? null;
+
+  if (voices.length === 0) {
+    return null;
+  }
+
+  // First try an exact match such as hi-IN or en-IN.
+  const exact = voices.find((voice) => voice.lang === lang);
+
+  if (exact) {
+    return exact;
+  }
+
+  // Then try the language prefix such as "hi" or "en".
+  const prefix = lang.split("-")[0] ?? lang;
+
+  const partial = voices.find((voice) =>
+    voice.lang.startsWith(prefix)
+  );
+
+  if (partial) {
+    return partial;
+  }
+
+  // Finally use the browser's first available voice.
+  return voices[0] ?? null;
 }
 
-/** Speaks the given text aloud using the best available matching voice. Cancels any speech already in progress first. */
+/**
+ * Speak text using the browser's built-in speech synthesis.
+ */
 export function speak(text: string): void {
-  if (!isSynthesisSupported()) return;
+  if (!isSynthesisSupported()) {
+    return;
+  }
+
+  if (!text.trim()) {
+    return;
+  }
+
   const synth = window.speechSynthesis;
+
+  // Stop any previous speech before starting new speech.
   synth.cancel();
 
   const utterNow = () => {
     const utterance = new SpeechSynthesisUtterance(text);
+
     const voice = pickVoice(detectSpeechLang(text));
-    if (voice) utterance.voice = voice;
+
+    if (voice) {
+      utterance.voice = voice;
+      utterance.lang = voice.lang;
+    } else {
+      utterance.lang = detectSpeechLang(text);
+    }
+
+    // Natural-ish default settings.
     utterance.rate = 1;
     utterance.pitch = 1;
+    utterance.volume = 1;
+
     synth.speak(utterance);
   };
 
-  if (synth.getVoices().length === 0) {
+  const availableVoices = synth.getVoices();
+
+  if (availableVoices.length === 0) {
     synth.onvoiceschanged = () => {
       utterNow();
       synth.onvoiceschanged = null;
@@ -93,6 +156,13 @@ export function speak(text: string): void {
   }
 }
 
+/**
+ * Stop Aanya's current speech.
+ */
 export function stopSpeaking(): void {
-  if (isSynthesisSupported()) window.speechSynthesis.cancel();
+  if (!isSynthesisSupported()) {
+    return;
+  }
+
+  window.speechSynthesis.cancel();
 }
