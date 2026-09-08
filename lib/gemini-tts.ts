@@ -1,8 +1,7 @@
+let currentSource: AudioBufferSourceNode | null = null;
 let audioContext: AudioContext | null = null;
 
-let currentSource: AudioBufferSourceNode | null = null;
-
-function getAudioContext(): AudioContext {
+function getAudioContext() {
   if (!audioContext) {
     audioContext = new AudioContext();
   }
@@ -10,91 +9,139 @@ function getAudioContext(): AudioContext {
   return audioContext;
 }
 
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  return bytes;
+}
+
+function pcmToAudioBuffer(
+  pcmData: Uint8Array,
+  sampleRate: number,
+  channels: number
+): AudioBuffer {
+  const context = getAudioContext();
+
+  const bytesPerSample = 2;
+  const frameCount =
+    pcmData.byteLength / (bytesPerSample * channels);
+
+  const audioBuffer = context.createBuffer(
+    channels,
+    frameCount,
+    sampleRate
+  );
+
+  const dataView = new DataView(
+    pcmData.buffer,
+    pcmData.byteOffset,
+    pcmData.byteLength
+  );
+
+  for (let channel = 0; channel < channels; channel++) {
+    const channelData = audioBuffer.getChannelData(channel);
+
+    for (let i = 0; i < frameCount; i++) {
+      const offset =
+        (i * channels + channel) * bytesPerSample;
+
+      const sample = dataView.getInt16(offset, true);
+
+      channelData[i] = sample / 32768;
+    }
+  }
+
+  return audioBuffer;
+}
+
 export async function speakWithGemini(
-  text: string,
-  voice = "Leda"
+  text: string
 ): Promise<void> {
   if (!text.trim()) {
     return;
   }
 
-  // Stop previous voice
-  stopGeminiSpeaking();
-
-  const context = getAudioContext();
-
-  // Resume audio context on mobile browsers
-  if (context.state === "suspended") {
-    await context.resume();
-  }
+  // Stop any currently playing Aanya voice.
+  stopGeminiSpeech();
 
   const response = await fetch("/api/tts", {
     method: "POST",
-
     headers: {
       "Content-Type": "application/json",
     },
-
     body: JSON.stringify({
       text,
-      voice,
     }),
   });
 
   if (!response.ok) {
-    const errorText = await response.text();
-
-    throw new Error(
-      `Gemini TTS failed: ${response.status} ${errorText}`
-    );
+    throw new Error("Gemini TTS request failed");
   }
 
-  const audioData =
-    await response.arrayBuffer();
+  const data = await response.json();
 
-  if (!audioData.byteLength) {
-    throw new Error(
-      "Gemini returned empty audio."
-    );
+  if (!data.audio) {
+    throw new Error("Gemini TTS returned no audio");
   }
 
-  const audioBuffer =
-    await context.decodeAudioData(
-      audioData
-    );
+  const sampleRate = data.sampleRate || 24000;
+  const channels = data.channels || 1;
 
-  const source =
-    context.createBufferSource();
+  const pcmBytes = base64ToUint8Array(data.audio);
+
+  const context = getAudioContext();
+
+  if (context.state === "suspended") {
+    await context.resume();
+  }
+
+  const audioBuffer = pcmToAudioBuffer(
+    pcmBytes,
+    sampleRate,
+    channels
+  );
+
+  const source = context.createBufferSource();
 
   source.buffer = audioBuffer;
-
-  source.connect(
-    context.destination
-  );
+  source.connect(context.destination);
 
   currentSource = source;
 
-  source.onended = () => {
-    if (currentSource === source) {
-      currentSource = null;
-    }
-  };
+  // IMPORTANT:
+  // The Promise resolves ONLY after the real audio
+  // playback has completely finished.
+  await new Promise<void>((resolve) => {
+    source.onended = () => {
+      if (currentSource === source) {
+        currentSource = null;
+      }
 
-  source.start(0);
+      resolve();
+    };
+
+    source.start(0);
+  });
 }
 
-export function stopGeminiSpeaking(): void {
-  if (!currentSource) {
-    return;
+export function stopGeminiSpeech() {
+  if (currentSource) {
+    try {
+      currentSource.stop();
+    } catch {
+      // Audio may already have finished.
+    }
+
+    currentSource.disconnect();
+    currentSource = null;
   }
+}
 
-  try {
-    currentSource.stop();
-  } catch {
-    // Already stopped.
-  }
-
-  currentSource.disconnect();
-
-  currentSource = null;
+export function isGeminiSpeaking(): boolean {
+  return currentSource !== null;
 }
