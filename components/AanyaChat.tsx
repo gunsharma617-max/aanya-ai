@@ -151,16 +151,10 @@ export default function AanyaChat() {
 
     setError(null);
 
-    /*
-     * New request always wins.
-     */
     chatAbortRef.current?.abort();
 
     chatAbortRef.current = null;
 
-    /*
-     * Stop previous voice immediately.
-     */
     voiceQueue.cancel();
 
     const userMessage:
@@ -209,13 +203,17 @@ export default function AanyaChat() {
       controller;
 
     /*
-     * Initialize audio directly from
-     * the user send action.
+     * Initialize audio from the
+     * user interaction.
+     *
+     * IMPORTANT:
+     * start() is async so we await
+     * AudioContext.resume().
      */
     if (
       voiceEnabledRef.current
     ) {
-      voiceQueue.start(
+      await voiceQueue.start(
         "Leda"
       );
     }
@@ -278,8 +276,8 @@ export default function AanyaChat() {
       let streamDone = false;
 
       /*
-       * Send available text to the
-       * TTS queue as early as possible.
+       * Send available text to TTS
+       * while NVIDIA is still streaming.
        */
       const processVoiceBuffer =
         () => {
@@ -289,10 +287,6 @@ export default function AanyaChat() {
             return;
           }
 
-          /*
-           * First extract normal completed
-           * sentences.
-           */
           const result =
             splitCompletedSentences(
               ttsBuffer
@@ -311,8 +305,8 @@ export default function AanyaChat() {
           }
 
           /*
-           * If there is a long unfinished
-           * sentence, don't wait for ".".
+           * Start speaking before a
+           * long sentence finishes.
            */
           if (
             ttsBuffer.trim()
@@ -351,9 +345,6 @@ export default function AanyaChat() {
       const processEvent = (
         frame: string
       ): boolean => {
-        /*
-         * Ignore stale request events.
-         */
         if (
           currentRequestId !==
           requestIdRef.current
@@ -431,16 +422,9 @@ export default function AanyaChat() {
             );
           }
 
-          /*
-           * Update visible answer.
-           */
           fullText +=
             event.delta;
 
-          /*
-           * Add streamed text to
-           * voice buffer.
-           */
           ttsBuffer +=
             event.delta;
 
@@ -460,10 +444,8 @@ export default function AanyaChat() {
           );
 
           /*
-           * IMPORTANT:
-           *
-           * Voice processing happens
-           * while NVIDIA is still streaming.
+           * Process TTS immediately
+           * while response is streaming.
            */
           if (
             voiceEnabledRef.current
@@ -472,10 +454,6 @@ export default function AanyaChat() {
           }
         }
 
-        /*
-         * event.delta block is correctly
-         * closed above.
-         */
         if (event.done) {
           streamDone = true;
 
@@ -525,10 +503,6 @@ export default function AanyaChat() {
             }
           }
 
-          /*
-           * Handle final unterminated SSE
-           * event.
-           */
           if (
             flush &&
             buffer.trim()
@@ -601,8 +575,8 @@ export default function AanyaChat() {
       }
 
       /*
-       * Anything remaining in the TTS
-       * buffer must also be spoken.
+       * Speak remaining text after
+       * NVIDIA finishes streaming.
        */
       if (
         voiceEnabledRef.current
@@ -617,10 +591,6 @@ export default function AanyaChat() {
 
         ttsBuffer = "";
 
-        /*
-         * NVIDIA is finished generating.
-         * Already queued audio can continue.
-         */
         voiceQueue.finish();
       }
 
@@ -974,4 +944,4 @@ function TypingIndicator() {
       </div>
     </div>
   );
-      }
+        }
