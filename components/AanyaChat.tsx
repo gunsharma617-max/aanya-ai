@@ -5,16 +5,14 @@ import Image from "next/image";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 
-import {
-  speakWithGemini,
-  stopGeminiSpeaking,
-} from "@/lib/gemini-tts";
+import { voiceQueue, splitCompletedSentences } from "@/lib/gemini-tts";
 
 import {
   createMessageId,
+  isAbortError,
   type ChatMessage as ChatMessageType,
-  type ChatResponseBody,
   type ChatErrorBody,
+  type ChatStreamEvent,
 } from "@/lib/aanya";
 
 const FALLBACK_ERROR =
@@ -22,18 +20,22 @@ const FALLBACK_ERROR =
 
 const VOICE_PREF_KEY = "aanya-voice-enabled";
 
+type Phase = "idle" | "thinking" | "generating" | "error";
+
 export default function AanyaChat() {
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [streamingId, setStreamingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   // Load saved voice preference
   useEffect(() => {
     const saved = localStorage.getItem(VOICE_PREF_KEY);
-
     if (saved !== null) {
       setVoiceEnabled(saved === "true");
     }
@@ -41,15 +43,23 @@ export default function AanyaChat() {
 
   // Save voice preference
   useEffect(() => {
-    localStorage.setItem(
-      VOICE_PREF_KEY,
-      String(voiceEnabled)
-    );
-
+    localStorage.setItem(VOICE_PREF_KEY, String(voiceEnabled));
     if (!voiceEnabled) {
-      stopGeminiSpeaking();
+      voiceQueue.cancel();
     }
   }, [voiceEnabled]);
+
+  // Track real speaking state + surface non-fatal per-sentence TTS errors once.
+  useEffect(() => {
+    const unsubscribe = voiceQueue.onSpeakingChange(setIsSpeaking);
+    voiceQueue.onError(() => {
+      setError((prev) => prev ?? "Aanya's voice had trouble with part of that reply.");
+    });
+    return () => {
+      unsubscribe();
+      voiceQueue.onError(null);
+    };
+  }, []);
 
   // Auto scroll
   useEffect(() => {
@@ -57,20 +67,22 @@ export default function AanyaChat() {
       top: scrollRef.current.scrollHeight,
       behavior: "smooth",
     });
-  }, [messages, isLoading]);
+  }, [messages, phase]);
 
-  // Stop voice when component unmounts
+  // Cancel everything on unmount
   useEffect(() => {
     return () => {
-      stopGeminiSpeaking();
+      chatAbortRef.current?.abort();
+      voiceQueue.cancel();
     };
   }, []);
 
   async function handleSend(text: string) {
     setError(null);
 
-    // Stop previous Gemini voice
-    stopGeminiSpeaking();
+    // A new request always wins: stop the previous generation and voice.
+    chatAbortRef.current?.abort();
+    voiceQueue.cancel();
 
     const userMessage: ChatMessageType = {
       id: createMessageId(),
@@ -79,93 +91,171 @@ export default function AanyaChat() {
       createdAt: Date.now(),
     };
 
-    const nextMessages = [
-      ...messages,
-      userMessage,
-    ];
+    const assistantId = createMessageId();
+    const assistantMessage: ChatMessageType = {
+      id: assistantId,
+      role: "assistant",
+      content: "",
+      createdAt: Date.now(),
+    };
 
-    setMessages(nextMessages);
-    setIsLoading(true);
+    const historyForApi = [...messages, userMessage].map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setStreamingId(assistantId);
+    setPhase("thinking");
+
+    const controller = new AbortController();
+    chatAbortRef.current = controller;
+
+    if (voiceEnabled) {
+      voiceQueue.start("Leda");
+    }
+
+    let fullText = "";
+    let ttsBuffer = "";
+    let gotFirstToken = false;
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          messages: nextMessages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-        }),
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ messages: historyForApi }),
       });
 
-      if (!res.ok) {
-        const body: ChatErrorBody =
-          await res.json().catch(() => ({
-            error: FALLBACK_ERROR,
-          }));
-
-        throw new Error(
-          body.error || FALLBACK_ERROR
-        );
+      if (!res.ok || !res.body) {
+        const body: ChatErrorBody = await res
+          .json()
+          .catch(() => ({ error: FALLBACK_ERROR }));
+        throw new Error(body.error || FALLBACK_ERROR);
       }
 
-      const data: ChatResponseBody =
-        await res.json();
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamError: string | null = null;
 
-      const assistantMessage: ChatMessageType = {
-        id: createMessageId(),
-        role: "assistant",
-        content: data.message.content,
-        createdAt: Date.now(),
-      };
+      readLoop: while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      setMessages((prev) => [
-        ...prev,
-        assistantMessage,
-      ]);
+        buffer += decoder.decode(value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
 
-      // ==============================
-      // GEMINI TTS — LEDA
-      // ==============================
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+
+          const jsonStr = line.slice(5).trim();
+          if (!jsonStr) continue;
+
+          let evt: ChatStreamEvent;
+          try {
+            evt = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          if (evt.error) {
+            streamError = evt.error;
+            break readLoop;
+          }
+
+          if (evt.delta) {
+            if (!gotFirstToken) {
+              gotFirstToken = true;
+              setPhase("generating");
+            }
+
+            fullText += evt.delta;
+            ttsBuffer += evt.delta;
+
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, content: fullText } : m
+              )
+            );
+
+            if (voiceEnabled) {
+              const { sentences, rest } = splitCompletedSentences(ttsBuffer);
+              ttsBuffer = rest;
+              for (const sentence of sentences) {
+                voiceQueue.enqueue(sentence);
+              }
+            }
+          }
+
+          if (evt.done) {
+            break readLoop;
+          }
+        }
+      }
+
+      if (streamError) {
+        throw new Error(streamError);
+      }
+
+      if (!fullText.trim()) {
+        throw new Error(FALLBACK_ERROR);
+      }
 
       if (voiceEnabled) {
-        speakWithGemini(
-          data.message.content,
-          "Leda"
-        ).catch((error) => {
-          console.error(
-            "Aanya Gemini TTS failed:",
-            error
-          );
-
-          setError(
-            "Aanya's Gemini voice could not be played."
-          );
-        });
+        if (ttsBuffer.trim()) {
+          voiceQueue.enqueue(ttsBuffer);
+        }
+        voiceQueue.finish();
       }
+
+      setPhase("idle");
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : FALLBACK_ERROR
+      if (isAbortError(err)) {
+        // Superseded by a newer message — this isn't a real failure.
+        return;
+      }
+
+      voiceQueue.cancel();
+      setError(err instanceof Error ? err.message : FALLBACK_ERROR);
+      setPhase("error");
+
+      // Drop the empty placeholder bubble if nothing ever streamed into it.
+      setMessages((prev) =>
+        prev.filter((m) => m.id !== assistantId || m.content.trim())
       );
     } finally {
-      setIsLoading(false);
+      setStreamingId((id) => (id === assistantId ? null : id));
     }
   }
 
+  const statusLabel =
+    phase === "thinking"
+      ? "Thinking..."
+      : phase === "generating"
+      ? "Typing..."
+      : isSpeaking
+      ? "Speaking..."
+      : phase === "error"
+      ? "Error"
+      : "Ready";
+
+  const statusDotClass =
+    phase === "error"
+      ? "bg-red-400"
+      : phase === "thinking" || phase === "generating"
+      ? "bg-amber-400 animate-pulse"
+      : isSpeaking
+      ? "bg-[var(--accent)] animate-pulse"
+      : "bg-emerald-400";
+
   return (
     <div className="mx-auto flex h-full w-full max-w-2xl flex-col">
-
       {/* HEADER */}
-
       <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-6">
-
         <div className="flex items-center gap-3">
-
           <Image
             src="/aanya/avatar.svg"
             alt="Aanya"
@@ -173,52 +263,27 @@ export default function AanyaChat() {
             height={38}
             className="h-[38px] w-[38px] rounded-full"
           />
-
           <div className="flex flex-col leading-tight">
-
             <span className="font-display text-[17px] font-medium text-[var(--text)]">
               Aanya
             </span>
-
             <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
-
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-
-              Ready
-
+              <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
+              {statusLabel}
             </span>
-
           </div>
-
         </div>
 
         {/* VOICE BUTTON */}
-
         <button
           type="button"
-          onClick={() =>
-            setVoiceEnabled((v) => !v)
-          }
-          aria-label={
-            voiceEnabled
-              ? "Mute Aanya's voice"
-              : "Unmute Aanya's voice"
-          }
+          onClick={() => setVoiceEnabled((v) => !v)}
+          aria-label={voiceEnabled ? "Mute Aanya's voice" : "Unmute Aanya's voice"}
           className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] text-[var(--text-muted)]"
         >
-
           {voiceEnabled ? (
-            <svg
-              width="17"
-              height="17"
-              viewBox="0 0 24 24"
-              fill="none"
-            >
-              <path
-                d="M4 9v6h4l5 4V5L8 9H4z"
-                fill="currentColor"
-              />
-
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+              <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor" />
               <path
                 d="M16 8a5 5 0 010 8"
                 stroke="currentColor"
@@ -227,17 +292,8 @@ export default function AanyaChat() {
               />
             </svg>
           ) : (
-            <svg
-              width="17"
-              height="17"
-              viewBox="0 0 24 24"
-              fill="none"
-            >
-              <path
-                d="M4 9v6h4l5 4V5L8 9H4z"
-                fill="currentColor"
-              />
-
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+              <path d="M4 9v6h4l5 4V5L8 9H4z" fill="currentColor" />
               <path
                 d="M16 9l5 6M21 9l-5 6"
                 stroke="currentColor"
@@ -246,61 +302,42 @@ export default function AanyaChat() {
               />
             </svg>
           )}
-
         </button>
-
       </header>
 
       {/* CHAT */}
-
       <div
         ref={scrollRef}
         className="flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6"
       >
-
-        {messages.length === 0 && (
-          <WelcomeState />
-        )}
+        {messages.length === 0 && <WelcomeState />}
 
         {messages.map((m) => (
           <ChatMessage
             key={m.id}
             message={m}
+            isStreaming={m.id === streamingId}
           />
         ))}
 
-        {isLoading && (
-          <TypingIndicator />
-        )}
+        {phase === "thinking" && <TypingIndicator />}
 
         {error && (
           <div className="mx-auto max-w-[85%] rounded-xl border border-[var(--danger)]/30 bg-[var(--danger-soft)] px-4 py-2.5 text-center text-[13.5px] text-[var(--text)]">
             {error}
           </div>
         )}
-
       </div>
 
-      {/* INPUT */}
-
-      <ChatInput
-        onSend={handleSend}
-        disabled={isLoading}
-        wakeWordEnabled={true}
-      />
-
+      {/* INPUT — never disabled, so a new message can interrupt generation or speech */}
+      <ChatInput onSend={handleSend} disabled={false} wakeWordEnabled={true} />
     </div>
   );
 }
 
-/* ==============================
-   WELCOME STATE
-================================ */
-
 function WelcomeState() {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 py-14 text-center">
-
       <Image
         src="/aanya/avatar.svg"
         alt="Aanya"
@@ -308,27 +345,19 @@ function WelcomeState() {
         height={56}
         className="h-14 w-14 rounded-full"
       />
-
       <p className="font-display text-[20px] font-medium text-[var(--text)]">
         Hi Boss 👋
       </p>
-
       <p className="max-w-xs text-[14.5px] text-[var(--text-muted)]">
         I&apos;m Aanya. What are we working on today?
       </p>
-
     </div>
   );
 }
 
-/* ==============================
-   TYPING INDICATOR
-================================ */
-
 function TypingIndicator() {
   return (
     <div className="flex items-center gap-2.5">
-
       <Image
         src="/aanya/avatar.svg"
         alt="Aanya"
@@ -336,17 +365,11 @@ function TypingIndicator() {
         height={30}
         className="h-[30px] w-[30px] shrink-0 rounded-full"
       />
-
       <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface-raised)] px-4 py-3.5">
-
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
-
       </div>
-
     </div>
   );
-}
+            }
