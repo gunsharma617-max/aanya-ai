@@ -1,33 +1,69 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { AANYA_SYSTEM_PROMPT } from "@/prompts/aanya-master-prompt";
-import type { ChatRequestBody, ChatErrorBody } from "@/lib/aanya";
+import type {
+  ChatRequestBody,
+  ChatErrorBody,
+} from "@/lib/aanya";
 import { isAbortError } from "@/lib/aanya";
 
 export const runtime = "nodejs";
 
-const DEFAULT_MODEL = "gemini-3.5-flash";
+const DEFAULT_MODEL =
+  "deepseek-ai/deepseek-v4-pro-0813";
+
 const MAX_MESSAGE_LENGTH = 8000;
 const MAX_HISTORY = 40;
+
+type NvidiaStreamChunk = {
+  choices?: Array<{
+    delta?: {
+      content?: unknown;
+      reasoning_content?: unknown;
+    };
+    finish_reason?: unknown;
+  }>;
+};
 
 export async function POST(req: NextRequest) {
   let body: ChatRequestBody;
 
+  // ------------------------------------------------------------
+  // 1. Read request body
+  // ------------------------------------------------------------
+
   try {
     body = await req.json();
   } catch {
-    return errorResponse("Malformed request body.", 400);
+    return errorResponse(
+      "Malformed request body.",
+      400
+    );
   }
+
+  // ------------------------------------------------------------
+  // 2. Validate request
+  // ------------------------------------------------------------
 
   const validation = validateBody(body);
 
   if (!validation.ok) {
-    return errorResponse(validation.reason, 400);
+    return errorResponse(
+      validation.reason,
+      400
+    );
   }
 
-  const apiKey = process.env.AI_API_KEY?.trim();
+  // ------------------------------------------------------------
+  // 3. NVIDIA credentials
+  // ------------------------------------------------------------
+
+  const apiKey =
+    process.env.NVIDIA_API_KEY?.trim();
 
   if (!apiKey) {
-    console.error("AI_API_KEY is not set.");
+    console.error(
+      "NVIDIA_API_KEY is not set."
+    );
 
     return errorResponse(
       "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.",
@@ -35,51 +71,79 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const model = (process.env.AI_MODEL?.trim() || DEFAULT_MODEL).trim();
+  const model =
+    (
+      process.env.NVIDIA_MODEL?.trim() ||
+      DEFAULT_MODEL
+    ).trim();
+
+  // ------------------------------------------------------------
+  // 4. NVIDIA OpenAI-compatible endpoint
+  // ------------------------------------------------------------
 
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-      model
-    )}:streamGenerateContent` +
-    `?alt=sse&key=${encodeURIComponent(apiKey)}`;
+    "https://integrate.api.nvidia.com/v1/chat/completions";
 
   let upstream: Response;
 
   try {
     upstream = await fetch(url, {
       method: "POST",
+
       headers: {
         "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
       },
+
       signal: req.signal,
+
       body: JSON.stringify({
-        systemInstruction: {
-          parts: [
-            {
-              text: AANYA_SYSTEM_PROMPT,
-            },
-          ],
+        model,
+
+        messages: [
+          {
+            role: "system",
+            content: AANYA_SYSTEM_PROMPT,
+          },
+
+          ...body.messages.map((message) => ({
+            role:
+              message.role === "assistant"
+                ? "assistant"
+                : "user",
+
+            content: message.content,
+          })),
+        ],
+
+        temperature: 0.7,
+        top_p: 0.95,
+
+        max_tokens: 16384,
+
+        // Disable DeepSeek thinking/reasoning output
+        // so only Aanya's actual answer is streamed.
+        chat_template_kwargs: {
+          thinking: false,
         },
 
-        contents: body.messages.map((message) => ({
-          role: message.role === "assistant" ? "model" : "user",
-
-          parts: [
-            {
-              text: message.content,
-            },
-          ],
-        })),
+        stream: true,
       }),
     });
   } catch (error) {
-    if (isAbortError(error)) {
+    if (
+      isAbortError(error) ||
+      req.signal.aborted
+    ) {
       return new Response(null, {
         status: 499,
       });
     }
 
-    console.error("Chat route network failure:", error);
+    console.error(
+      "NVIDIA provider network failure:",
+      error
+    );
 
     return errorResponse(
       "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.",
@@ -87,279 +151,414 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ------------------------------------------------------------
+  // 5. Handle NVIDIA HTTP errors
+  // ------------------------------------------------------------
+
   if (!upstream.ok || !upstream.body) {
-    const detail = await safeReadText(upstream);
+    const detail =
+      await safeReadText(upstream);
 
     console.error(
-      "Gemini provider error:",
+      "NVIDIA provider error:",
       upstream.status,
       detail
     );
 
     return errorResponse(
       getProviderErrorMessage(detail) ??
-        "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.",
+        "Sorry Boss, NVIDIA's AI service returned an error. Please try again.",
       502
     );
   }
 
-  const encoder = new TextEncoder();
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
+  // ------------------------------------------------------------
+  // 6. Convert NVIDIA SSE → Aanya SSE
+  // ------------------------------------------------------------
 
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let buffer = "";
-      let sawAnyText = false;
-      let streamEnded = false;
-      let terminalError: string | null = null;
+  const encoder =
+    new TextEncoder();
 
-      const onAbort = () => {
-        void reader.cancel().catch(() => undefined);
-      };
+  const reader =
+    upstream.body.getReader();
 
-      req.signal.addEventListener("abort", onAbort);
+  const decoder =
+    new TextDecoder();
 
-      const emit = (payload: Record<string, unknown>) => {
-        try {
-          controller.enqueue(
-            encoder.encode(sseData(payload))
-          );
-        } catch {
-          // Client disconnected.
-        }
-      };
+  const stream =
+    new ReadableStream<Uint8Array>({
+      async start(controller) {
+        let buffer = "";
 
-      const processEvent = (event: string): boolean => {
-        const dataLines = getSseDataLines(event);
+        let sawAnyText = false;
+        let streamEnded = false;
 
-        if (dataLines.length === 0) {
-          return false;
-        }
+        let terminalError:
+          | string
+          | null = null;
 
-        const payload = dataLines.join("\n").trim();
+        // ------------------------------------------------------
+        // Abort NVIDIA request when browser cancels request
+        // ------------------------------------------------------
 
-        if (!payload) {
-          return false;
-        }
+        const onAbort = () => {
+          void reader
+            .cancel()
+            .catch(() => undefined);
+        };
 
-        if (payload === "[DONE]") {
-          streamEnded = true;
-          return true;
-        }
+        req.signal.addEventListener(
+          "abort",
+          onAbort
+        );
 
-        let parsed: unknown;
+        // ------------------------------------------------------
+        // Send SSE event to Aanya frontend
+        // ------------------------------------------------------
 
-        try {
-          parsed = JSON.parse(payload);
-        } catch {
-          terminalError =
-            "Gemini returned an invalid streaming event.";
-
-          console.error(
-            "Invalid Gemini SSE JSON:",
-            payload
-          );
-
-          return true;
-        }
-
-        const providerError =
-          getProviderErrorMessageFromData(parsed);
-
-        if (providerError) {
-          terminalError = providerError;
-          return true;
-        }
-
-        const blockReason = getBlockReason(parsed);
-
-        if (blockReason) {
-          terminalError =
-            `Response blocked: ${blockReason}`;
-
-          return true;
-        }
-
-        const finishReason = getFinishReason(parsed);
-
-        if (
-          finishReason &&
-          !extractDeltaText(parsed)
-        ) {
-          const normalized =
-            finishReason.toUpperCase();
-
-          if (normalized !== "STOP") {
-            terminalError =
-              `Gemini ended the response with finish reason: ${finishReason}.`;
-
-            return true;
-          }
-        }
-
-        const delta = extractDeltaText(parsed);
-
-        if (delta) {
-          sawAnyText = true;
-
-          emit({
-            delta,
-          });
-        }
-
-        return false;
-      };
-
-      const processBufferedEvents = (
-        flush = false
-      ): boolean => {
-        while (true) {
-          const delimiter =
-            findSseDelimiter(buffer);
-
-          if (delimiter === -1) {
-            break;
-          }
-
-          const event =
-            buffer.slice(0, delimiter);
-
-          buffer = buffer.slice(
-            delimiter +
-              sseDelimiterLength(
-                buffer,
-                delimiter
+        const emit = (
+          payload: Record<string, unknown>
+        ) => {
+          try {
+            controller.enqueue(
+              encoder.encode(
+                sseData(payload)
               )
-          );
+            );
+          } catch {
+            // Client disconnected.
+          }
+        };
 
-          if (processEvent(event)) {
+        // ------------------------------------------------------
+        // Process one NVIDIA SSE event
+        // ------------------------------------------------------
+
+        const processEvent = (
+          event: string
+        ): boolean => {
+          const dataLines =
+            getSseDataLines(event);
+
+          if (
+            dataLines.length === 0
+          ) {
+            return false;
+          }
+
+          const payload =
+            dataLines
+              .join("\n")
+              .trim();
+
+          if (!payload) {
+            return false;
+          }
+
+          // NVIDIA/OpenAI-compatible
+          // stream termination.
+          if (
+            payload === "[DONE]"
+          ) {
+            streamEnded = true;
             return true;
           }
-        }
 
-        if (flush && buffer.trim()) {
-          const finalEvent = buffer;
+          let parsed:
+            | NvidiaStreamChunk
+            | {
+                error?: {
+                  message?: unknown;
+                  type?: unknown;
+                  code?: unknown;
+                };
+              };
 
-          buffer = "";
+          try {
+            parsed =
+              JSON.parse(payload);
+          } catch {
+            terminalError =
+              "NVIDIA returned an invalid streaming event.";
 
-          return processEvent(finalEvent);
-        }
-
-        return false;
-      };
-
-      try {
-        outer: while (!streamEnded) {
-          const {
-            done,
-            value,
-          } = await reader.read();
-
-          if (done) {
-            buffer += decoder.decode();
-
-            processBufferedEvents(true);
-
-            break;
-          }
-
-          if (value) {
-            buffer += decoder.decode(
-              value,
-              {
-                stream: true,
-              }
+            console.error(
+              "Invalid NVIDIA SSE JSON:",
+              payload
             );
 
+            return true;
+          }
+
+          // ----------------------------------------------------
+          // Provider error inside SSE
+          // ----------------------------------------------------
+
+          const providerError =
+            getProviderErrorMessageFromData(
+              parsed
+            );
+
+          if (providerError) {
+            terminalError =
+              providerError;
+
+            return true;
+          }
+
+          // ----------------------------------------------------
+          // Extract normal assistant text
+          // ----------------------------------------------------
+
+          const delta =
+            extractDeltaText(parsed);
+
+          if (delta) {
+            sawAnyText = true;
+
+            emit({
+              delta,
+            });
+          }
+
+          // ----------------------------------------------------
+          // Check finish reason
+          // ----------------------------------------------------
+
+          const finishReason =
+            getFinishReason(parsed);
+
+          if (
+            finishReason &&
+            finishReason !== "stop" &&
+            finishReason !== "length"
+          ) {
+            terminalError =
+              `NVIDIA ended the response with finish reason: ${finishReason}.`;
+
+            return true;
+          }
+
+          return false;
+        };
+
+        // ------------------------------------------------------
+        // Process buffered SSE events
+        // ------------------------------------------------------
+
+        const processBufferedEvents = (
+          flush = false
+        ): boolean => {
+          while (true) {
+            const delimiter =
+              findSseDelimiter(buffer);
+
             if (
-              processBufferedEvents(false)
+              delimiter === -1
+            ) {
+              break;
+            }
+
+            const event =
+              buffer.slice(
+                0,
+                delimiter
+              );
+
+            buffer =
+              buffer.slice(
+                delimiter +
+                  sseDelimiterLength(
+                    buffer,
+                    delimiter
+                  )
+              );
+
+            if (
+              processEvent(event)
+            ) {
+              return true;
+            }
+          }
+
+          // Some providers can close the connection
+          // without a final blank line.
+          if (
+            flush &&
+            buffer.trim()
+          ) {
+            const finalEvent =
+              buffer;
+
+            buffer = "";
+
+            return processEvent(
+              finalEvent
+            );
+          }
+
+          return false;
+        };
+
+        // ------------------------------------------------------
+        // Read NVIDIA stream
+        // ------------------------------------------------------
+
+        try {
+          outer: while (
+            !streamEnded
+          ) {
+            const {
+              done,
+              value,
+            } =
+              await reader.read();
+
+            if (done) {
+              buffer +=
+                decoder.decode();
+
+              processBufferedEvents(
+                true
+              );
+
+              break;
+            }
+
+            if (value) {
+              buffer +=
+                decoder.decode(
+                  value,
+                  {
+                    stream: true,
+                  }
+                );
+
+              if (
+                processBufferedEvents(
+                  false
+                )
+              ) {
+                break outer;
+              }
+            }
+
+            if (
+              req.signal.aborted
             ) {
               break outer;
             }
           }
 
-          if (req.signal.aborted) {
-            break outer;
+          // ----------------------------------------------------
+          // Request was cancelled by user
+          // ----------------------------------------------------
+
+          if (
+            req.signal.aborted
+          ) {
+            return;
           }
-        }
 
-        if (req.signal.aborted) {
-          return;
-        }
+          // ----------------------------------------------------
+          // Provider returned an error
+          // ----------------------------------------------------
 
-        if (terminalError) {
+          if (terminalError) {
+            emit({
+              error:
+                terminalError,
+            });
+
+            return;
+          }
+
+          // ----------------------------------------------------
+          // Nothing came back
+          // ----------------------------------------------------
+
+          if (!sawAnyText) {
+            emit({
+              error:
+                "NVIDIA completed the stream without returning any text.",
+            });
+
+            return;
+          }
+
+          // ----------------------------------------------------
+          // Normal completion
+          // ----------------------------------------------------
+
           emit({
-            error: terminalError,
+            done: true,
           });
+        } catch (error) {
+          if (
+            isAbortError(error) ||
+            req.signal.aborted
+          ) {
+            return;
+          }
 
-          return;
-        }
+          console.error(
+            "NVIDIA chat stream failure:",
+            error
+          );
 
-        if (!sawAnyText) {
           emit({
             error:
-              "Gemini completed the stream without returning any text.",
+              "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.",
           });
+        } finally {
+          req.signal.removeEventListener(
+            "abort",
+            onAbort
+          );
 
-          return;
+          try {
+            controller.close();
+          } catch {
+            // Already closed.
+          }
         }
+      },
 
-        emit({
-          done: true,
-        });
-      } catch (error) {
-        if (
-          isAbortError(error) ||
-          req.signal.aborted
-        ) {
-          return;
-        }
+      cancel() {
+        void reader
+          .cancel()
+          .catch(() => undefined);
+      },
+    });
 
-        console.error(
-          "Chat stream failure:",
-          error
-        );
+  // ------------------------------------------------------------
+  // 7. Return SSE response to AanyaChat.tsx
+  // ------------------------------------------------------------
 
-        emit({
-          error:
-            "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.",
-        });
-      } finally {
-        req.signal.removeEventListener(
-          "abort",
-          onAbort
-        );
+  return new Response(
+    stream,
+    {
+      status: 200,
 
-        try {
-          controller.close();
-        } catch {
-          // Already closed.
-        }
-      }
-    },
+      headers: {
+        "Content-Type":
+          "text/event-stream; charset=utf-8",
 
-    cancel() {
-      void reader.cancel().catch(() => undefined);
-    },
-  });
+        "Cache-Control":
+          "no-cache, no-transform",
 
-  return new Response(stream, {
-    status: 200,
+        Connection:
+          "keep-alive",
 
-    headers: {
-      "Content-Type":
-        "text/event-stream; charset=utf-8",
-
-      "Cache-Control":
-        "no-cache, no-transform",
-
-      Connection: "keep-alive",
-
-      "X-Accel-Buffering": "no",
-    },
-  });
+        "X-Accel-Buffering":
+          "no",
+      },
+    }
+  );
 }
+
+// ============================================================
+// SSE HELPERS
+// ============================================================
 
 function sseData(
   payload: Record<string, unknown>
@@ -387,17 +586,24 @@ function findSseDelimiter(
 ): number {
   let best = -1;
 
-  for (const delimiter of [
-    "\r\n\r\n",
-    "\n\n",
-    "\r\r",
-  ]) {
+  for (
+    const delimiter of [
+      "\r\n\r\n",
+      "\n\n",
+      "\r\r",
+    ]
+  ) {
     const index =
-      value.indexOf(delimiter);
+      value.indexOf(
+        delimiter
+      );
 
     if (
       index !== -1 &&
-      (best === -1 || index < best)
+      (
+        best === -1 ||
+        index < best
+      )
     ) {
       best = index;
     }
@@ -431,11 +637,209 @@ function sseDelimiterLength(
   return 2;
 }
 
+// ============================================================
+// NVIDIA RESPONSE PARSING
+// ============================================================
+
+function extractDeltaText(
+  data: unknown
+): string | null {
+  if (
+    !data ||
+    typeof data !== "object"
+  ) {
+    return null;
+  }
+
+  const choices =
+    (
+      data as {
+        choices?: unknown;
+      }
+    ).choices;
+
+  if (
+    !Array.isArray(
+      choices
+    ) ||
+    choices.length === 0
+  ) {
+    return null;
+  }
+
+  const first =
+    choices[0] as {
+      delta?: {
+        content?: unknown;
+      };
+    };
+
+  const content =
+    first.delta?.content;
+
+  return typeof content ===
+    "string" &&
+    content.length > 0
+    ? content
+    : null;
+}
+
+function getFinishReason(
+  data: unknown
+): string | null {
+  if (
+    !data ||
+    typeof data !== "object"
+  ) {
+    return null;
+  }
+
+  const choices =
+    (
+      data as {
+        choices?: unknown;
+      }
+    ).choices;
+
+  if (
+    !Array.isArray(
+      choices
+    ) ||
+    choices.length === 0
+  ) {
+    return null;
+  }
+
+  const first =
+    choices[0] as {
+      finish_reason?: unknown;
+    };
+
+  return typeof first.finish_reason ===
+    "string"
+    ? first.finish_reason
+    : null;
+}
+
+// ============================================================
+// NVIDIA ERROR PARSING
+// ============================================================
+
+function getProviderErrorMessageFromData(
+  data: unknown
+): string | null {
+  if (
+    !data ||
+    typeof data !== "object"
+  ) {
+    return null;
+  }
+
+  const error =
+    (
+      data as {
+        error?: {
+          message?: unknown;
+          type?: unknown;
+          code?: unknown;
+        };
+      }
+    ).error;
+
+  if (
+    !error ||
+    typeof error !== "object"
+  ) {
+    return null;
+  }
+
+  if (
+    typeof error.message ===
+      "string" &&
+    error.message.trim()
+  ) {
+    return `NVIDIA error: ${error.message.trim()}`;
+  }
+
+  if (
+    typeof error.type ===
+      "string" &&
+    error.type.trim()
+  ) {
+    return `NVIDIA error: ${error.type.trim()}`;
+  }
+
+  if (
+    typeof error.code ===
+      "string" &&
+    error.code.trim()
+  ) {
+    return `NVIDIA error: ${error.code.trim()}`;
+  }
+
+  if (
+    typeof error.code ===
+      "number"
+  ) {
+    return `NVIDIA error (code ${error.code}).`;
+  }
+
+  return "NVIDIA returned an error.";
+}
+
+function getProviderErrorMessage(
+  detail: string
+): string | null {
+  try {
+    const parsed =
+      JSON.parse(detail);
+
+    return getProviderErrorMessageFromData(
+      parsed
+    );
+  } catch {
+    // Sometimes provider errors are
+    // returned as plain text.
+    const cleaned =
+      detail.trim();
+
+    if (
+      cleaned &&
+      cleaned.length < 500
+    ) {
+      return `NVIDIA error: ${cleaned}`;
+    }
+
+    return null;
+  }
+}
+
+// ============================================================
+// SAFE RESPONSE READER
+// ============================================================
+
+async function safeReadText(
+  res: Response
+): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return "<unreadable response body>";
+  }
+}
+
+// ============================================================
+// REQUEST VALIDATION
+// ============================================================
+
 function validateBody(
   body: unknown
 ):
   | { ok: true }
-  | { ok: false; reason: string } {
+  | {
+      ok: false;
+      reason: string;
+    } {
   if (
     !body ||
     typeof body !== "object"
@@ -448,10 +852,14 @@ function validateBody(
   }
 
   const messages =
-    (body as ChatRequestBody).messages;
+    (
+      body as ChatRequestBody
+    ).messages;
 
   if (
-    !Array.isArray(messages) ||
+    !Array.isArray(
+      messages
+    ) ||
     messages.length === 0
   ) {
     return {
@@ -462,7 +870,8 @@ function validateBody(
   }
 
   if (
-    messages.length > MAX_HISTORY
+    messages.length >
+    MAX_HISTORY
   ) {
     return {
       ok: false,
@@ -471,12 +880,19 @@ function validateBody(
     };
   }
 
-  for (const message of messages) {
+  for (
+    const message of messages
+  ) {
     if (
       !message ||
-      typeof message !== "object" ||
-      (message.role !== "user" &&
-        message.role !== "assistant") ||
+      typeof message !==
+        "object" ||
+      (
+        message.role !==
+          "user" &&
+        message.role !==
+          "assistant"
+      ) ||
       typeof message.content !==
         "string" ||
       message.content.trim()
@@ -506,198 +922,9 @@ function validateBody(
   };
 }
 
-function extractDeltaText(
-  data: unknown
-): string | null {
-  if (
-    !data ||
-    typeof data !== "object"
-  ) {
-    return null;
-  }
-
-  const candidates =
-    (
-      data as {
-        candidates?: unknown;
-      }
-    ).candidates;
-
-  if (
-    !Array.isArray(candidates) ||
-    candidates.length === 0
-  ) {
-    return null;
-  }
-
-  const first =
-    candidates[0] as {
-      content?: {
-        parts?: Array<{
-          text?: unknown;
-        }>;
-      };
-    };
-
-  const parts =
-    first.content?.parts;
-
-  if (!Array.isArray(parts)) {
-    return null;
-  }
-
-  const text = parts
-    .map((part) => part?.text)
-    .filter(
-      (
-        value
-      ): value is string =>
-        typeof value === "string"
-    )
-    .join("");
-
-  return text.length > 0
-    ? text
-    : null;
-}
-
-function getBlockReason(
-  data: unknown
-): string | null {
-  if (
-    !data ||
-    typeof data !== "object"
-  ) {
-    return null;
-  }
-
-  const feedback = (
-    data as {
-      promptFeedback?: {
-        blockReason?: unknown;
-      };
-    }
-  ).promptFeedback;
-
-  return typeof feedback?.blockReason ===
-    "string"
-    ? feedback.blockReason
-    : null;
-}
-
-function getFinishReason(
-  data: unknown
-): string | null {
-  if (
-    !data ||
-    typeof data !== "object"
-  ) {
-    return null;
-  }
-
-  const candidates =
-    (
-      data as {
-        candidates?: unknown;
-      }
-    ).candidates;
-
-  if (
-    !Array.isArray(candidates) ||
-    candidates.length === 0
-  ) {
-    return null;
-  }
-
-  const first =
-    candidates[0] as {
-      finishReason?: unknown;
-    };
-
-  return typeof first.finishReason ===
-    "string"
-    ? first.finishReason
-    : null;
-}
-
-function getProviderErrorMessageFromData(
-  data: unknown
-): string | null {
-  if (
-    !data ||
-    typeof data !== "object"
-  ) {
-    return null;
-  }
-
-  const error =
-    (
-      data as {
-        error?: {
-          message?: unknown;
-          status?: unknown;
-          code?: unknown;
-        };
-      }
-    ).error;
-
-  if (
-    !error ||
-    typeof error !== "object"
-  ) {
-    return null;
-  }
-
-  if (
-    typeof error.message ===
-      "string" &&
-    error.message.trim()
-  ) {
-    return `Gemini error: ${error.message.trim()}`;
-  }
-
-  if (
-    typeof error.status ===
-      "string" &&
-    error.status.trim()
-  ) {
-    return `Gemini error: ${error.status.trim()}`;
-  }
-
-  if (
-    typeof error.code ===
-    "number"
-  ) {
-    return `Gemini error (code ${error.code}).`;
-  }
-
-  return "Gemini returned an error.";
-}
-
-function getProviderErrorMessage(
-  detail: string
-): string | null {
-  try {
-    const parsed: unknown =
-      JSON.parse(detail);
-
-    return getProviderErrorMessageFromData(
-      parsed
-    );
-  } catch {
-    return null;
-  }
-}
-
-async function safeReadText(
-  response: Response
-): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return "<unreadable response body>";
-  }
-}
+// ============================================================
+// ERROR RESPONSE
+// ============================================================
 
 function errorResponse(
   message: string,
@@ -707,10 +934,10 @@ function errorResponse(
     error: message,
   };
 
-  return NextResponse.json(
+  return Response.json(
     body,
     {
       status,
     }
   );
-              }
+          }
