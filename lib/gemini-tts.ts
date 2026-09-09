@@ -1,9 +1,14 @@
 /**
  * Streaming-friendly voice player for Aanya's Gemini TTS.
  *
- * Sentences are pushed one at a time as the chat reply streams in.
- * Starting a new reply cancels every fetch/playback operation belonging to
- * the previous reply so a stale TTS request can never block the new one.
+ * Sentences are queued while Gemini is generating the answer.
+ *
+ * A new request cancels:
+ * - old TTS fetches
+ * - old audio playback
+ * - old queued sentences
+ *
+ * This prevents an old answer from speaking over a new answer.
  */
 
 const TTS_TIMEOUT_MS = 15000;
@@ -16,12 +21,14 @@ export type ErrorListener =
 
 class AanyaVoiceQueue {
   private audioContext:
-    | AudioContext
-    | null = null;
+    AudioContext | null = null;
 
   private currentSource:
-    | AudioBufferSourceNode
-    | null = null;
+    AudioBufferSourceNode | null =
+      null;
+
+  private currentPlaybackCancel:
+    (() => void) | null = null;
 
   private queue: string[] = [];
 
@@ -39,23 +46,29 @@ class AanyaVoiceQueue {
     new Set<SpeakingListener>();
 
   private errorListener:
-    | ErrorListener
-    | null = null;
+    ErrorListener | null = null;
 
-  /*
-   * A reply may have one active TTS fetch plus
-   * one prefetched fetch.
-   *
-   * Keep every controller so cancel() can abort
-   * the complete operation.
-   */
   private activeTtsControllers =
     new Set<AbortController>();
 
   private getContext(): AudioContext {
     if (!this.audioContext) {
+      const AudioContextCtor =
+        window.AudioContext ||
+        (
+          window as typeof window & {
+            webkitAudioContext?: typeof AudioContext;
+          }
+        ).webkitAudioContext;
+
+      if (!AudioContextCtor) {
+        throw new Error(
+          "This browser does not support audio playback."
+        );
+      }
+
       this.audioContext =
-        new AudioContext();
+        new AudioContextCtor();
     }
 
     return this.audioContext;
@@ -79,30 +92,57 @@ class AanyaVoiceQueue {
   onError(
     listener: ErrorListener | null
   ): void {
-    this.errorListener =
-      listener;
+    this.errorListener = listener;
   }
 
   isSpeaking(): boolean {
     return this.speaking;
   }
 
-  start(
-    voice = "Leda"
-  ): void {
+  /**
+   * Start a completely new voice session.
+   */
+  start(voice = "Leda"): void {
     this.cancel();
 
     this.activeToken++;
 
     this.voice = voice;
 
-    this.streamFinished =
-      false;
+    this.streamFinished = false;
+
+    /*
+     * IMPORTANT:
+     *
+     * Create AudioContext immediately while the
+     * browser still considers this a user gesture.
+     *
+     * This fixes many Android/mobile autoplay cases.
+     */
+    try {
+      const context =
+        this.getContext();
+
+      if (
+        context.state ===
+        "suspended"
+      ) {
+        void context
+          .resume()
+          .catch(() => undefined);
+      }
+    } catch (error) {
+      this.errorListener?.(
+        error instanceof Error
+          ? error
+          : new Error(
+              "Unable to initialize audio playback."
+            )
+      );
+    }
   }
 
-  enqueue(
-    text: string
-  ): void {
+  enqueue(text: string): void {
     const trimmed =
       text.trim();
 
@@ -118,8 +158,7 @@ class AanyaVoiceQueue {
   }
 
   finish(): void {
-    this.streamFinished =
-      true;
+    this.streamFinished = true;
 
     if (
       !this.processing &&
@@ -132,21 +171,21 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Stop playback and abort every
-   * pending TTS fetch immediately.
+   * Completely stop current voice activity.
    */
   cancel(): void {
     /*
-     * Invalidate the current reply before
-     * aborting anything.
+     * Invalidate old work FIRST.
      */
     this.activeToken++;
 
     this.queue = [];
 
-    this.streamFinished =
-      true;
+    this.streamFinished = true;
 
+    /*
+     * Abort every active TTS request.
+     */
     for (
       const controller of
         this.activeTtsControllers
@@ -160,6 +199,9 @@ class AanyaVoiceQueue {
 
     this.activeTtsControllers.clear();
 
+    /*
+     * Stop current audio immediately.
+     */
     if (this.currentSource) {
       try {
         this.currentSource.stop();
@@ -173,9 +215,22 @@ class AanyaVoiceQueue {
         // Already disconnected.
       }
 
-      this.currentSource =
-        null;
+      this.currentSource = null;
     }
+
+    /*
+     * Do not depend only on onended().
+     *
+     * Explicitly resolve the playback promise so
+     * an old request can never keep processing=true.
+     */
+    const cancelPlayback =
+      this.currentPlaybackCancel;
+
+    this.currentPlaybackCancel =
+      null;
+
+    cancelPlayback?.();
 
     this.setSpeaking(false);
   }
@@ -222,7 +277,10 @@ class AanyaVoiceQueue {
           await context.resume();
         }
       } catch {
-        // Retry on next user gesture.
+        /*
+         * Browser may require another
+         * user gesture.
+         */
       }
 
       while (
@@ -316,28 +374,24 @@ class AanyaVoiceQueue {
         this.setSpeaking(false);
       }
 
-      this.processing =
-        false;
+      this.processing = false;
 
       /*
-       * If a new request queued text while
-       * the previous loop was waiting for an
-       * aborted fetch, immediately restart
-       * the current token.
+       * If a new request arrived while the
+       * old loop was shutting down, restart
+       * using the newest token.
        */
       if (
         this.queue.length > 0 &&
         !this.streamFinished &&
-        token !==
-          this.activeToken
+        token !== this.activeToken
       ) {
         void this.runLoop(
           this.activeToken
         );
       } else if (
         this.queue.length > 0 &&
-        token ===
-          this.activeToken
+        token === this.activeToken
       ) {
         void this.runLoop(
           this.activeToken
@@ -375,22 +429,25 @@ class AanyaVoiceQueue {
 
     try {
       const response =
-        await fetch("/api/tts", {
-          method: "POST",
+        await fetch(
+          "/api/tts",
+          {
+            method: "POST",
 
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
 
-          signal:
-            controller.signal,
+            signal:
+              controller.signal,
 
-          body: JSON.stringify({
-            text,
-            voice,
-          }),
-        });
+            body: JSON.stringify({
+              text,
+              voice,
+            }),
+          }
+        );
 
       if (!response.ok) {
         throw new Error(
@@ -419,31 +476,34 @@ class AanyaVoiceQueue {
       return await context.decodeAudioData(
         audioData
       );
-    } catch (err) {
+    } catch (error) {
+      const wasAbort =
+        error instanceof
+          DOMException &&
+        error.name ===
+          "AbortError";
+
+      const wasAbortError =
+        error instanceof Error &&
+        error.name ===
+          "AbortError";
+
       /*
-       * Abort caused by cancel() is expected
-       * and should not appear as a user error.
+       * Aborts caused by Stop/new request
+       * are expected and should not show
+       * as errors.
        */
       if (
-        !(
-          err instanceof
-            DOMException &&
-          err.name ===
-            "AbortError"
-        ) &&
-        !(
-          err instanceof Error &&
-          err.name ===
-            "AbortError"
-        ) &&
+        !wasAbort &&
+        !wasAbortError &&
         token ===
           this.activeToken
       ) {
         this.errorListener?.(
-          err instanceof Error
-            ? err
+          error instanceof Error
+            ? error
             : new Error(
-                String(err)
+                String(error)
               )
         );
       }
@@ -476,8 +536,7 @@ class AanyaVoiceQueue {
         const source =
           context.createBufferSource();
 
-        source.buffer =
-          buffer;
+        source.buffer = buffer;
 
         source.connect(
           context.destination
@@ -503,6 +562,14 @@ class AanyaVoiceQueue {
               null;
           }
 
+          if (
+            this.currentPlaybackCancel ===
+            finish
+          ) {
+            this.currentPlaybackCancel =
+              null;
+          }
+
           try {
             source.disconnect();
           } catch {
@@ -513,6 +580,9 @@ class AanyaVoiceQueue {
         };
 
         source.onended =
+          finish;
+
+        this.currentPlaybackCancel =
           finish;
 
         try {
@@ -526,13 +596,13 @@ class AanyaVoiceQueue {
 }
 
 function sleep(
-  ms: number
+  milliseconds: number
 ): Promise<void> {
   return new Promise(
     (resolve) =>
       setTimeout(
         resolve,
-        ms
+        milliseconds
       )
   );
 }
@@ -555,8 +625,7 @@ export function splitCompletedSentences(
     };
   }
 
-  const sentences: string[] =
-    [];
+  const sentences: string[] = [];
 
   let consumed = 0;
 
@@ -578,10 +647,9 @@ export function splitCompletedSentences(
 
   return {
     sentences,
-    rest:
-      buffer.slice(
-        consumed
-      ),
+    rest: buffer.slice(
+      consumed
+    ),
   };
 }
 
