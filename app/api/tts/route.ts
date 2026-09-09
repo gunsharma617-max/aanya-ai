@@ -1,4 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import {
+  NextRequest,
+  NextResponse,
+} from "next/server";
 
 export const runtime = "nodejs";
 
@@ -37,15 +40,18 @@ export async function POST(
   req: NextRequest
 ) {
   try {
-    const body = await req.json();
+    const body =
+      await req.json();
 
     const text =
-      typeof body?.text === "string"
+      typeof body?.text ===
+      "string"
         ? body.text.trim()
         : "";
 
     const voice =
-      typeof body?.voice === "string" &&
+      typeof body?.voice ===
+        "string" &&
       body.voice.trim()
         ? body.voice.trim()
         : DEFAULT_VOICE;
@@ -53,7 +59,8 @@ export async function POST(
     if (!text) {
       return NextResponse.json(
         {
-          error: "Text is required.",
+          error:
+            "Text is required.",
         },
         {
           status: 400,
@@ -92,6 +99,14 @@ export async function POST(
           "Content-Type":
             "application/json",
         },
+
+        /*
+         * Important:
+         * cancelling /api/tts now also
+         * cancels the Gemini TTS request.
+         */
+        signal:
+          req.signal,
 
         body: JSON.stringify({
           contents: [
@@ -136,7 +151,8 @@ export async function POST(
         {
           error:
             "Gemini TTS request failed.",
-          status: upstream.status,
+          status:
+            upstream.status,
           detail,
         },
         {
@@ -161,7 +177,8 @@ export async function POST(
           ) =>
             typeof part
               ?.inlineData
-              ?.data === "string"
+              ?.data ===
+            "string"
         )
         ?.inlineData
         ?.data;
@@ -189,12 +206,13 @@ export async function POST(
         "base64"
       );
 
-    const wav = pcmToWav(
-      pcm,
-      24000,
-      1,
-      16
-    );
+    const wav =
+      pcmToWav(
+        pcm,
+        24000,
+        1,
+        16
+      );
 
     return new NextResponse(
       new Uint8Array(wav),
@@ -211,6 +229,20 @@ export async function POST(
       }
     );
   } catch (error) {
+    if (
+      req.signal.aborted ||
+      (error instanceof Error &&
+        error.name ===
+          "AbortError")
+    ) {
+      return new Response(
+        null,
+        {
+          status: 499,
+        }
+      );
+    }
+
     console.error(
       "TTS route failure:",
       error
