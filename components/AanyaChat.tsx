@@ -30,10 +30,6 @@ const FALLBACK_ERROR =
 const VOICE_PREF_KEY =
   "aanya-voice-enabled";
 
-/*
- * Voice should start early instead of waiting
- * for a complete long paragraph.
- */
 const EARLY_TTS_CHUNK_SIZE = 45;
 
 type Phase =
@@ -72,10 +68,6 @@ export default function AanyaChat() {
   const voiceEnabledRef =
     useRef(true);
 
-  /*
-   * Prevents an old request from updating
-   * the UI after a new request starts.
-   */
   const requestIdRef =
     useRef(0);
 
@@ -113,11 +105,6 @@ export default function AanyaChat() {
       );
 
     voiceQueue.onError(() => {
-      /*
-       * TTS errors should NOT destroy the
-       * text response. We only show the
-       * small voice warning.
-       */
       setError(
         (previous) =>
           previous ??
@@ -156,9 +143,6 @@ export default function AanyaChat() {
       return;
     }
 
-    /*
-     * Every new question gets a new request ID.
-     */
     const currentRequestId =
       requestIdRef.current + 1;
 
@@ -168,17 +152,15 @@ export default function AanyaChat() {
     setError(null);
 
     /*
-     * NEW REQUEST ALWAYS WINS.
-     *
-     * Stop:
-     * 1. Previous NVIDIA chat stream
-     * 2. Previous Gemini TTS requests
-     * 3. Previous audio playback
+     * New request always wins.
      */
     chatAbortRef.current?.abort();
 
     chatAbortRef.current = null;
 
+    /*
+     * Stop previous voice immediately.
+     */
     voiceQueue.cancel();
 
     const userMessage:
@@ -227,10 +209,8 @@ export default function AanyaChat() {
       controller;
 
     /*
-     * IMPORTANT FOR MOBILE:
-     *
-     * Initialize AudioContext directly
-     * from the user's send action.
+     * Initialize audio directly from
+     * the user send action.
      */
     if (
       voiceEnabledRef.current
@@ -297,12 +277,82 @@ export default function AanyaChat() {
 
       let streamDone = false;
 
+      /*
+       * Send available text to the
+       * TTS queue as early as possible.
+       */
+      const processVoiceBuffer =
+        () => {
+          if (
+            !voiceEnabledRef.current
+          ) {
+            return;
+          }
+
+          /*
+           * First extract normal completed
+           * sentences.
+           */
+          const result =
+            splitCompletedSentences(
+              ttsBuffer
+            );
+
+          ttsBuffer =
+            result.rest;
+
+          for (
+            const sentence of
+              result.sentences
+          ) {
+            voiceQueue.enqueue(
+              sentence
+            );
+          }
+
+          /*
+           * If there is a long unfinished
+           * sentence, don't wait for ".".
+           */
+          if (
+            ttsBuffer.trim()
+              .length >=
+            EARLY_TTS_CHUNK_SIZE
+          ) {
+            const cut =
+              findSpeechCut(
+                ttsBuffer,
+                EARLY_TTS_CHUNK_SIZE
+              );
+
+            if (cut > 0) {
+              const chunk =
+                ttsBuffer
+                  .slice(
+                    0,
+                    cut
+                  )
+                  .trim();
+
+              ttsBuffer =
+                ttsBuffer
+                  .slice(cut)
+                  .trimStart();
+
+              if (chunk) {
+                voiceQueue.enqueue(
+                  chunk
+                );
+              }
+            }
+          }
+        };
+
       const processEvent = (
         frame: string
       ): boolean => {
         /*
-         * Ignore events belonging to an
-         * obsolete request.
+         * Ignore stale request events.
          */
         if (
           currentRequestId !==
@@ -344,8 +394,7 @@ export default function AanyaChat() {
         }
 
         if (
-          payload ===
-          "[DONE]"
+          payload === "[DONE]"
         ) {
           streamDone = true;
           return true;
@@ -383,13 +432,14 @@ export default function AanyaChat() {
           }
 
           /*
-           * Update complete visible answer.
+           * Update visible answer.
            */
           fullText +=
             event.delta;
 
           /*
-           * Add streamed text to voice buffer.
+           * Add streamed text to
+           * voice buffer.
            */
           ttsBuffer +=
             event.delta;
@@ -410,14 +460,10 @@ export default function AanyaChat() {
           );
 
           /*
-           * LOW-LATENCY VOICE
+           * IMPORTANT:
            *
-           * This function will:
-           *
-           * 1. Speak completed sentences immediately.
-           * 2. If no punctuation has arrived yet,
-           *    release a natural short chunk around
-           *    45 characters.
+           * Voice processing happens
+           * while NVIDIA is still streaming.
            */
           if (
             voiceEnabledRef.current
@@ -426,6 +472,10 @@ export default function AanyaChat() {
           }
         }
 
+        /*
+         * event.delta block is correctly
+         * closed above.
+         */
         if (event.done) {
           streamDone = true;
 
@@ -434,77 +484,6 @@ export default function AanyaChat() {
 
         return false;
       };
-
-      /*
-       * Process current TTS buffer.
-       */
-      const processVoiceBuffer =
-        () => {
-          if (
-            !voiceEnabledRef.current
-          ) {
-            return;
-          }
-
-          /*
-           * First let the normal sentence splitter
-           * extract punctuation-based sentences.
-           */
-          const result =
-            splitCompletedSentences(
-              ttsBuffer
-            );
-
-          ttsBuffer =
-            result.rest;
-
-          for (
-            const sentence of
-              result.sentences
-          ) {
-            voiceQueue.enqueue(
-              sentence
-            );
-          }
-
-          /*
-           * If Gemini/NVIDIA is producing a long
-           * sentence without punctuation, don't wait
-           * for the entire sentence.
-           */
-          if (
-            ttsBuffer.trim()
-              .length >=
-            EARLY_TTS_CHUNK_SIZE
-          ) {
-            const cut =
-              findSpeechCut(
-                ttsBuffer,
-                EARLY_TTS_CHUNK_SIZE
-              );
-
-            if (cut > 0) {
-              const chunk =
-                ttsBuffer
-                  .slice(
-                    0,
-                    cut
-                  )
-                  .trim();
-
-              ttsBuffer =
-                ttsBuffer
-                  .slice(cut)
-                  .trimStart();
-
-              if (chunk) {
-                voiceQueue.enqueue(
-                  chunk
-                );
-              }
-            }
-          }
-        };
 
       const processBufferedEvents =
         (
@@ -547,8 +526,8 @@ export default function AanyaChat() {
           }
 
           /*
-           * Some providers can close the SSE
-           * stream without the final blank line.
+           * Handle final unterminated SSE
+           * event.
            */
           if (
             flush &&
@@ -607,26 +586,6 @@ export default function AanyaChat() {
         }
       }
 
-      /*
-       * Process any remaining text that did not
-       * contain punctuation.
-       */
-      if (
-        voiceEnabledRef.current &&
-        ttsBuffer.trim()
-      ) {
-        const remaining =
-          ttsBuffer.trim();
-
-        if (remaining) {
-          voiceQueue.enqueue(
-            remaining
-          );
-        }
-
-        ttsBuffer = "";
-      }
-
       if (streamError) {
         throw new Error(
           streamError
@@ -642,14 +601,26 @@ export default function AanyaChat() {
       }
 
       /*
-       * Tell voice queue that NVIDIA has finished.
-       *
-       * Gemini can still finish speaking anything
-       * already queued.
+       * Anything remaining in the TTS
+       * buffer must also be spoken.
        */
       if (
         voiceEnabledRef.current
       ) {
+        if (
+          ttsBuffer.trim()
+        ) {
+          voiceQueue.enqueue(
+            ttsBuffer.trim()
+          );
+        }
+
+        ttsBuffer = "";
+
+        /*
+         * NVIDIA is finished generating.
+         * Already queued audio can continue.
+         */
         voiceQueue.finish();
       }
 
@@ -660,15 +631,9 @@ export default function AanyaChat() {
         currentRequestId !==
           requestIdRef.current
       ) {
-        /*
-         * Old request was replaced.
-         */
         return;
       }
 
-      /*
-       * Only cancel voice for a REAL chat error.
-       */
       voiceQueue.cancel();
 
       setError(
@@ -855,9 +820,6 @@ export default function AanyaChat() {
   );
 }
 
-/**
- * Finds an SSE event delimiter.
- */
 function findSseDelimiter(
   value: string
 ): number {
@@ -887,10 +849,6 @@ function findSseDelimiter(
   return best;
 }
 
-/**
- * Returns the length of the delimiter
- * at the specified index.
- */
 function sseDelimiterLength(
   value: string,
   index: number
@@ -916,21 +874,13 @@ function sseDelimiterLength(
   return 2;
 }
 
-/**
- * Find a natural speech boundary.
- *
- * Prefer:
- * 1. punctuation
- * 2. comma
- * 3. space
- */
 function findSpeechCut(
   text: string,
   target: number
 ): number {
   const start =
     Math.max(
-      20,
+      15,
       target - 20
     );
 
@@ -946,13 +896,14 @@ function findSpeechCut(
       end
     );
 
-  const punctuationCandidates = [
-    region.lastIndexOf("."),
-    region.lastIndexOf(","),
-    region.lastIndexOf("?"),
-    region.lastIndexOf("!"),
-    region.lastIndexOf("।"),
-  ];
+  const punctuationCandidates =
+    [
+      region.lastIndexOf("."),
+      region.lastIndexOf(","),
+      region.lastIndexOf("?"),
+      region.lastIndexOf("!"),
+      region.lastIndexOf("।"),
+    ];
 
   const punctuation =
     Math.max(
@@ -974,8 +925,7 @@ function findSpeechCut(
 
   if (space >= 0) {
     return (
-      start +
-      space
+      start + space
     );
   }
 
@@ -1023,5 +973,5 @@ function TypingIndicator() {
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
       </div>
     </div>
-    );
-}
+  );
+      }
