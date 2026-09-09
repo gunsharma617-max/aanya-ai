@@ -6,41 +6,63 @@
  * - Keeps one audio chunk playing while preparing the next one.
  * - Retries temporary TTS failures.
  * - Cancels stale requests when a new user message arrives.
+ * - Explicitly resumes AudioContext before playback.
  */
 
 const TTS_TIMEOUT_MS = 30000;
 const MAX_RETRIES = 2;
 
-export type SpeakingListener = (speaking: boolean) => void;
-export type ErrorListener = (err: Error) => void;
+export type SpeakingListener = (
+  speaking: boolean
+) => void;
+
+export type ErrorListener = (
+  err: Error
+) => void;
 
 class AanyaVoiceQueue {
-  private audioContext: AudioContext | null = null;
+  private audioContext: AudioContext | null =
+    null;
 
-  private currentSource: AudioBufferSourceNode | null = null;
-  private currentPlaybackCancel: (() => void) | null = null;
+  private currentSource:
+    | AudioBufferSourceNode
+    | null = null;
+
+  private currentPlaybackCancel:
+    | (() => void)
+    | null = null;
 
   private queue: string[] = [];
 
   private activeToken = 0;
+
   private processing = false;
+
   private streamFinished = true;
 
   private voice = "Leda";
+
   private speaking = false;
 
-  private speakingListeners = new Set<SpeakingListener>();
-  private errorListener: ErrorListener | null = null;
+  private speakingListeners =
+    new Set<SpeakingListener>();
 
-  private activeTtsControllers = new Set<AbortController>();
+  private errorListener:
+    | ErrorListener
+    | null = null;
+
+  private activeTtsControllers =
+    new Set<AbortController>();
 
   private getContext(): AudioContext {
     if (!this.audioContext) {
       const AudioContextCtor =
         window.AudioContext ||
-        (window as typeof window & {
-          webkitAudioContext?: typeof AudioContext;
-        }).webkitAudioContext;
+        (
+          window as typeof window & {
+            webkitAudioContext?: typeof AudioContext;
+          }
+        ).webkitAudioContext;
 
       if (!AudioContextCtor) {
         throw new Error(
@@ -48,23 +70,32 @@ class AanyaVoiceQueue {
         );
       }
 
-      this.audioContext = new AudioContextCtor();
+      this.audioContext =
+        new AudioContextCtor();
     }
 
     return this.audioContext;
   }
 
-  onSpeakingChange(listener: SpeakingListener): () => void {
-    this.speakingListeners.add(listener);
+  onSpeakingChange(
+    listener: SpeakingListener
+  ): () => void {
+    this.speakingListeners.add(
+      listener
+    );
 
     listener(this.speaking);
 
     return () => {
-      this.speakingListeners.delete(listener);
+      this.speakingListeners.delete(
+        listener
+      );
     };
   }
 
-  onError(listener: ErrorListener | null): void {
+  onError(
+    listener: ErrorListener | null
+  ): void {
     this.errorListener = listener;
   }
 
@@ -74,25 +105,78 @@ class AanyaVoiceQueue {
 
   /**
    * Start a completely new voice response.
+   *
+   * IMPORTANT:
+   * This is async so mobile browsers have time to
+   * resume the AudioContext before TTS playback starts.
    */
-  start(voice = "Leda"): void {
+  async start(
+    voice = "Leda"
+  ): Promise<void> {
     this.cancel();
 
     this.activeToken++;
+
+    const token =
+      this.activeToken;
+
     this.voice = voice;
+
     this.streamFinished = false;
 
     try {
-      const context = this.getContext();
+      const context =
+        this.getContext();
 
-      if (context.state === "suspended") {
-        void context.resume().catch(() => undefined);
+      if (
+        context.state ===
+        "suspended"
+      ) {
+        await context.resume();
+      }
+
+      if (
+        token !==
+        this.activeToken
+      ) {
+        return;
+      }
+
+      /*
+       * Some browsers can temporarily report
+       * "interrupted". Try resume once more.
+       */
+      if (
+        context.state !==
+        "running"
+      ) {
+        try {
+          await context.resume();
+        } catch {
+          // Handled below.
+        }
+      }
+
+      if (
+        context.state !==
+        "running"
+      ) {
+        throw new Error(
+          `AudioContext is not running (${context.state}).`
+        );
       }
     } catch (error) {
+      console.error(
+        "Aanya audio initialization error:",
+        error
+      );
+
       this.errorListener?.(
         error instanceof Error
           ? error
-          : new Error("Unable to initialize audio playback.")
+          : new Error(
+              "Unable to initialize audio playback."
+            )
       );
     }
   }
@@ -100,43 +184,63 @@ class AanyaVoiceQueue {
   /**
    * Add a small speech chunk.
    */
-  enqueue(text: string): void {
-    const trimmed = text.trim();
+  enqueue(
+    text: string
+  ): void {
+    const trimmed =
+      text.trim();
 
     if (!trimmed) {
       return;
     }
 
-    this.queue.push(trimmed);
+    this.queue.push(
+      trimmed
+    );
 
-    void this.runLoop(this.activeToken);
+    void this.runLoop(
+      this.activeToken
+    );
   }
 
   /**
-   * Tell the queue that the AI response is completely finished.
+   * Tell the queue that the AI response
+   * is completely finished.
    */
   finish(): void {
-    this.streamFinished = true;
+    this.streamFinished =
+      true;
 
-    if (!this.processing && this.queue.length > 0) {
-      void this.runLoop(this.activeToken);
+    if (
+      !this.processing &&
+      this.queue.length > 0
+    ) {
+      void this.runLoop(
+        this.activeToken
+      );
     }
   }
 
   /**
-   * Cancel everything belonging to the current reply.
+   * Cancel everything belonging to
+   * the current reply.
    */
   cancel(): void {
     this.activeToken++;
 
     this.queue = [];
-    this.streamFinished = true;
 
-    for (const controller of this.activeTtsControllers) {
+    this.streamFinished =
+      true;
+
+    for (
+      const controller of
+        this.activeTtsControllers
+    ) {
       try {
         controller.abort();
       } catch {
-        // Ignore already-aborted controllers.
+        // Ignore.
       }
     }
 
@@ -155,88 +259,151 @@ class AanyaVoiceQueue {
         // Already disconnected.
       }
 
-      this.currentSource = null;
+      this.currentSource =
+        null;
     }
 
-    const cancelPlayback = this.currentPlaybackCancel;
+    const cancelPlayback =
+      this.currentPlaybackCancel;
 
-    this.currentPlaybackCancel = null;
+    this.currentPlaybackCancel =
+      null;
 
     cancelPlayback?.();
 
     this.setSpeaking(false);
   }
 
-  private setSpeaking(value: boolean): void {
-    if (this.speaking === value) {
+  private setSpeaking(
+    value: boolean
+  ): void {
+    if (
+      this.speaking === value
+    ) {
       return;
     }
 
     this.speaking = value;
 
-    this.speakingListeners.forEach((listener) => {
-      listener(value);
-    });
+    this.speakingListeners.forEach(
+      (listener) => {
+        try {
+          listener(value);
+        } catch {
+          // Don't let one listener
+          // break the voice queue.
+        }
+      }
+    );
   }
 
   /**
    * Main playback loop.
    *
-   * We allow ONE next TTS request to be prepared while the current
-   * audio is playing. This reduces gaps without flooding Gemini.
+   * One next TTS request can be prepared
+   * while the current audio is playing.
    */
-  private async runLoop(token: number): Promise<void> {
-    if (this.processing) {
+  private async runLoop(
+    token: number
+  ): Promise<void> {
+    if (
+      this.processing
+    ) {
+      return;
+    }
+
+    if (
+      token !==
+      this.activeToken
+    ) {
       return;
     }
 
     this.processing = true;
 
-    let prefetched: Promise<AudioBuffer | null> | null = null;
+    let prefetched:
+      | Promise<AudioBuffer | null>
+      | null = null;
 
     try {
-      const context = this.getContext();
+      const context =
+        this.getContext();
 
-      try {
-        if (context.state === "suspended") {
+      /*
+       * Make absolutely sure the context
+       * is running before doing anything.
+       */
+      if (
+        context.state ===
+        "suspended"
+      ) {
+        try {
           await context.resume();
+        } catch (error) {
+          console.error(
+            "Aanya AudioContext resume failed:",
+            error
+          );
         }
-      } catch {
-        // Browser may resume it automatically after interaction.
       }
 
-      while (token === this.activeToken) {
-        let bufferPromise: Promise<AudioBuffer | null>;
+      if (
+        context.state !==
+        "running"
+      ) {
+        throw new Error(
+          `AudioContext is not running: ${context.state}`
+        );
+      }
+
+      while (
+        token ===
+        this.activeToken
+      ) {
+        let bufferPromise:
+          | Promise<AudioBuffer | null>;
 
         /*
-         * Use the already-prepared next chunk if available.
+         * Use already prepared chunk.
          */
         if (prefetched) {
-          bufferPromise = prefetched;
-          prefetched = null;
+          bufferPromise =
+            prefetched;
+
+          prefetched =
+            null;
         } else {
-          const text = this.queue.shift();
+          const text =
+            this.queue.shift();
 
           if (!text) {
-            if (this.streamFinished) {
+            if (
+              this.streamFinished
+            ) {
               break;
             }
 
             await sleep(30);
+
             continue;
           }
 
-          bufferPromise = this.fetchBufferWithRetry(
-            text,
-            this.voice,
-            context,
-            token
-          );
+          bufferPromise =
+            this.fetchBufferWithRetry(
+              text,
+              this.voice,
+              context,
+              token
+            );
         }
 
-        const buffer = await bufferPromise;
+        const buffer =
+          await bufferPromise;
 
-        if (token !== this.activeToken) {
+        if (
+          token !==
+          this.activeToken
+        ) {
           break;
         }
 
@@ -245,26 +412,58 @@ class AanyaVoiceQueue {
         }
 
         /*
-         * Prepare ONLY ONE next chunk.
-         *
-         * This is intentionally limited to one request.
+         * Prepare exactly one next chunk.
          */
-        const nextText = this.queue.shift();
+        const nextText =
+          this.queue.shift();
 
         if (nextText) {
-          prefetched = this.fetchBufferWithRetry(
-            nextText,
-            this.voice,
-            context,
-            token
-          );
+          prefetched =
+            this.fetchBufferWithRetry(
+              nextText,
+              this.voice,
+              context,
+              token
+            );
         }
 
-        if (token !== this.activeToken) {
+        if (
+          token !==
+          this.activeToken
+        ) {
           break;
         }
 
-        this.setSpeaking(true);
+        /*
+         * Context may have been suspended
+         * while Gemini was generating audio.
+         */
+        if (
+          context.state !==
+          "running"
+        ) {
+          try {
+            await context.resume();
+          } catch (error) {
+            console.error(
+              "Aanya could not resume audio before playback:",
+              error
+            );
+          }
+        }
+
+        if (
+          context.state !==
+          "running"
+        ) {
+          throw new Error(
+            `AudioContext stopped before playback: ${context.state}`
+          );
+        }
+
+        this.setSpeaking(
+          true
+        );
 
         await this.playBuffer(
           context,
@@ -272,21 +471,53 @@ class AanyaVoiceQueue {
           token
         );
       }
+    } catch (error) {
+      if (
+        token ===
+        this.activeToken
+      ) {
+        console.error(
+          "Aanya voice queue error:",
+          error
+        );
+
+        this.errorListener?.(
+          error instanceof Error
+            ? error
+            : new Error(
+                "Aanya voice playback failed."
+              )
+        );
+      }
     } finally {
-      if (token === this.activeToken) {
+      if (
+        token ===
+        this.activeToken
+      ) {
         this.setSpeaking(false);
       }
 
-      this.processing = false;
+      this.processing =
+        false;
 
-      if (this.queue.length > 0) {
-        void this.runLoop(this.activeToken);
+      /*
+       * If something arrived while the
+       * loop was finishing, continue.
+       */
+      if (
+        token ===
+          this.activeToken &&
+        this.queue.length > 0
+      ) {
+        void this.runLoop(
+          this.activeToken
+        );
       }
     }
   }
 
   /**
-   * Retry Gemini TTS a couple of times when a request temporarily fails.
+   * Retry Gemini TTS when a request fails.
    */
   private async fetchBufferWithRetry(
     text: string,
@@ -294,42 +525,80 @@ class AanyaVoiceQueue {
     context: AudioContext,
     token: number
   ): Promise<AudioBuffer | null> {
+    let lastError:
+      | Error
+      | null = null;
+
     for (
       let attempt = 0;
       attempt <= MAX_RETRIES;
       attempt++
     ) {
-      if (token !== this.activeToken) {
+      if (
+        token !==
+        this.activeToken
+      ) {
         return null;
       }
 
-      const buffer = await this.fetchBuffer(
-        text,
-        voice,
-        context,
-        token
-      );
+      try {
+        const buffer =
+          await this.fetchBuffer(
+            text,
+            voice,
+            context,
+            token
+          );
 
-      if (buffer) {
-        return buffer;
+        if (buffer) {
+          return buffer;
+        }
+
+        lastError =
+          new Error(
+            "Gemini TTS returned no audio."
+          );
+      } catch (error) {
+        lastError =
+          error instanceof Error
+            ? error
+            : new Error(
+                "Gemini TTS request failed."
+              );
       }
 
-      if (token !== this.activeToken) {
+      if (
+        token !==
+        this.activeToken
+      ) {
         return null;
       }
 
-      if (attempt < MAX_RETRIES) {
+      if (
+        attempt <
+        MAX_RETRIES
+      ) {
         await sleep(
-          400 * (attempt + 1)
+          400 *
+            (attempt + 1)
         );
       }
     }
 
-    if (token === this.activeToken) {
+    if (
+      token ===
+      this.activeToken
+    ) {
+      console.error(
+        "Aanya TTS final failure:",
+        lastError
+      );
+
       this.errorListener?.(
-        new Error(
-          "Aanya's voice could not generate one part of the reply."
-        )
+        lastError ??
+          new Error(
+            "Aanya's voice could not generate one part of the reply."
+          )
       );
     }
 
@@ -345,78 +614,140 @@ class AanyaVoiceQueue {
     context: AudioContext,
     token: number
   ): Promise<AudioBuffer | null> {
-    if (token !== this.activeToken) {
+    if (
+      token !==
+      this.activeToken
+    ) {
       return null;
     }
 
     const controller =
       new AbortController();
 
-    const timeout = setTimeout(
-      () => controller.abort(),
-      TTS_TIMEOUT_MS
-    );
+    const timeout =
+      setTimeout(
+        () =>
+          controller.abort(),
+        TTS_TIMEOUT_MS
+      );
 
     this.activeTtsControllers.add(
       controller
     );
 
     try {
-      const response = await fetch(
-        "/api/tts",
-        {
-          method: "POST",
-
-          headers: {
-            "Content-Type":
-              "application/json",
-          },
-
-          signal:
-            controller.signal,
-
-          body: JSON.stringify({
-            text,
-            voice,
-          }),
-        }
+      console.log(
+        "Aanya TTS request:",
+        text
       );
 
-      if (!response.ok) {
+      const response =
+        await fetch(
+          "/api/tts",
+          {
+            method: "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            signal:
+              controller.signal,
+
+            body: JSON.stringify({
+              text,
+              voice,
+            }),
+          }
+        );
+
+      if (
+        !response.ok
+      ) {
+        let serverMessage =
+          "";
+
+        try {
+          serverMessage =
+            await response.text();
+        } catch {
+          // Ignore.
+        }
+
         throw new Error(
-          `Gemini TTS failed: ${response.status}`
+          `Gemini TTS failed: ${response.status}${
+            serverMessage
+              ? ` - ${serverMessage.slice(
+                  0,
+                  300
+                )}`
+              : ""
+          }`
         );
       }
 
       const audioData =
         await response.arrayBuffer();
 
-      if (!audioData.byteLength) {
+      if (
+        !audioData.byteLength
+      ) {
         throw new Error(
           "Gemini TTS returned empty audio."
         );
       }
 
-      if (token !== this.activeToken) {
+      if (
+        token !==
+        this.activeToken
+      ) {
         return null;
       }
 
-      return await context.decodeAudioData(
-        audioData
+      console.log(
+        "Aanya TTS audio received:",
+        audioData.byteLength,
+        "bytes"
       );
+
+      const decoded =
+        await context.decodeAudioData(
+          audioData.slice(0)
+        );
+
+      if (
+        !decoded ||
+        decoded.length === 0
+      ) {
+        throw new Error(
+          "Decoded Gemini TTS audio is empty."
+        );
+      }
+
+      console.log(
+        "Aanya TTS audio decoded:",
+        decoded.duration,
+        "seconds"
+      );
+
+      return decoded;
     } catch (error) {
       const isAbort =
         error instanceof DOMException &&
-        error.name === "AbortError";
+        error.name ===
+          "AbortError";
 
       const isNamedAbort =
         error instanceof Error &&
-        error.name === "AbortError";
+        error.name ===
+          "AbortError";
 
       if (
         !isAbort &&
         !isNamedAbort &&
-        token === this.activeToken
+        token ===
+          this.activeToken
       ) {
         console.error(
           "Aanya TTS error:",
@@ -424,9 +755,11 @@ class AanyaVoiceQueue {
         );
       }
 
-      return null;
+      throw error;
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(
+        timeout
+      );
 
       this.activeTtsControllers.delete(
         controller
@@ -435,7 +768,7 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Play one audio buffer.
+   * Play one decoded audio buffer.
    */
   private playBuffer(
     context: AudioContext,
@@ -444,7 +777,18 @@ class AanyaVoiceQueue {
   ): Promise<void> {
     return new Promise<void>(
       (resolve) => {
-        if (token !== this.activeToken) {
+        if (
+          token !==
+          this.activeToken
+        ) {
+          resolve();
+          return;
+        }
+
+        if (
+          context.state !==
+          "running"
+        ) {
           resolve();
           return;
         }
@@ -452,7 +796,8 @@ class AanyaVoiceQueue {
         const source =
           context.createBufferSource();
 
-        source.buffer = buffer;
+        source.buffer =
+          buffer;
 
         source.connect(
           context.destination
@@ -461,48 +806,56 @@ class AanyaVoiceQueue {
         this.currentSource =
           source;
 
-        let settled = false;
+        let settled =
+          false;
 
-        const finish = () => {
-          if (settled) {
-            return;
-          }
+        const finish =
+          () => {
+            if (settled) {
+              return;
+            }
 
-          settled = true;
+            settled = true;
 
-          if (
-            this.currentSource ===
-            source
-          ) {
-            this.currentSource =
-              null;
-          }
+            if (
+              this.currentSource ===
+              source
+            ) {
+              this.currentSource =
+                null;
+            }
 
-          if (
-            this.currentPlaybackCancel ===
-            finish
-          ) {
-            this.currentPlaybackCancel =
-              null;
-          }
+            if (
+              this.currentPlaybackCancel ===
+              finish
+            ) {
+              this.currentPlaybackCancel =
+                null;
+            }
 
-          try {
-            source.disconnect();
-          } catch {
-            // Already disconnected.
-          }
+            try {
+              source.disconnect();
+            } catch {
+              // Already disconnected.
+            }
 
-          resolve();
-        };
+            resolve();
+          };
 
-        source.onended = finish;
+        source.onended =
+          finish;
 
         this.currentPlaybackCancel =
           finish;
 
         try {
           source.start(0);
-        } catch {
+        } catch (error) {
+          console.error(
+            "Aanya audio source start failed:",
+            error
+          );
+
           finish();
         }
       }
@@ -523,12 +876,8 @@ function sleep(
 }
 
 /**
- * Converts streamed AI text into low-latency speech chunks.
- *
- * Normal sentences stay intact.
- *
- * Very long sentences are split around ~80 characters so Aanya
- * does not wait for the entire paragraph before starting to speak.
+ * Converts streamed AI text into
+ * low-latency speech chunks.
  */
 export function splitCompletedSentences(
   buffer: string
@@ -538,117 +887,156 @@ export function splitCompletedSentences(
 } {
   const results: string[] = [];
 
-  let remaining = buffer;
+  let remaining =
+    buffer;
 
   /*
-   * First extract completed punctuation-based sentences.
+   * Extract completed sentences.
    */
   const sentenceRegex =
     /[^.!?।]*[.!?।]+(?:["')\]]+)?\s*/g;
 
   const matches =
-    remaining.match(sentenceRegex);
+    remaining.match(
+      sentenceRegex
+    );
 
   let consumed = 0;
 
   if (matches) {
-    for (const match of matches) {
-      const trimmed = match.trim();
+    for (
+      const match of matches
+    ) {
+      const trimmed =
+        match.trim();
 
       if (trimmed) {
-        results.push(...splitLongChunk(trimmed));
+        results.push(
+          ...splitLongChunk(
+            trimmed
+          )
+        );
       }
 
-      consumed += match.length;
+      consumed +=
+        match.length;
     }
 
     remaining =
-      remaining.slice(consumed);
+      remaining.slice(
+        consumed
+      );
   }
 
   /*
-   * If the unfinished text has already become reasonably long,
-   * release a natural chunk without waiting for punctuation.
+   * Release long unfinished text.
    */
-  if (remaining.trim().length >= 80) {
-    const cut = findNaturalCut(
-      remaining,
-      80
-    );
+  if (
+    remaining.trim()
+      .length >= 80
+  ) {
+    const cut =
+      findNaturalCut(
+        remaining,
+        80
+      );
 
     if (cut > 0) {
       const chunk =
         remaining
-          .slice(0, cut)
+          .slice(
+            0,
+            cut
+          )
           .trim();
 
       if (chunk) {
-        results.push(chunk);
+        results.push(
+          chunk
+        );
       }
 
       remaining =
-        remaining.slice(cut);
+        remaining.slice(
+          cut
+        );
     }
   }
 
   return {
-    sentences: results,
-    rest: remaining,
+    sentences:
+      results,
+    rest:
+      remaining,
   };
 }
 
 /**
- * Split an unusually long sentence into natural pieces.
+ * Split an unusually long sentence.
  */
 function splitLongChunk(
   text: string
 ): string[] {
   const MAX = 90;
 
-  if (text.length <= MAX) {
+  if (
+    text.length <= MAX
+  ) {
     return [text];
   }
 
   const result: string[] = [];
 
-  let remaining = text;
+  let remaining =
+    text;
 
-  while (remaining.length > MAX) {
+  while (
+    remaining.length >
+    MAX
+  ) {
     const cut =
       findNaturalCut(
         remaining,
         MAX
       );
 
-    if (cut <= 0) {
+    if (
+      cut <= 0
+    ) {
       break;
     }
 
     const piece =
       remaining
-        .slice(0, cut)
+        .slice(
+          0,
+          cut
+        )
         .trim();
 
     if (piece) {
-      result.push(piece);
+      result.push(
+        piece
+      );
     }
 
     remaining =
-      remaining.slice(cut).trim();
+      remaining
+        .slice(cut)
+        .trim();
   }
 
   if (remaining) {
-    result.push(remaining);
+    result.push(
+      remaining
+    );
   }
 
   return result;
 }
 
 /**
- * Find a good place to cut speech.
- *
- * Priority:
- * comma → space → fallback.
+ * Find a natural speech cut.
  */
 function findNaturalCut(
   text: string,
@@ -675,7 +1063,9 @@ function findNaturalCut(
   const comma =
     region.lastIndexOf(",");
 
-  if (comma >= 0) {
+  if (
+    comma >= 0
+  ) {
     return (
       searchStart +
       comma +
@@ -686,7 +1076,9 @@ function findNaturalCut(
   const space =
     region.lastIndexOf(" ");
 
-  if (space >= 0) {
+  if (
+    space >= 0
+  ) {
     return (
       searchStart +
       space
