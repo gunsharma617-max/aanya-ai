@@ -344,26 +344,15 @@ export default function AanyaChat() {
               )
           );
 
-          if (
-            voiceEnabledRef.current
-          ) {
-            const {
-              sentences,
-              rest,
-            } =
-              splitCompletedSentences(
-                ttsBuffer
-              );
+          if (voiceEnabledRef.current) {
+  const { sentences, rest } =
+    splitCompletedSentences(ttsBuffer);
 
-            ttsBuffer = rest;
+  ttsBuffer = rest;
 
-            for (
-              const sentence of sentences
-            ) {
-              voiceQueue.enqueue(
-                sentence
-              );
-            }
+  for (const sentence of sentences) {
+    voiceQueue.enqueue(sentence);
+       
           }
         }
 
