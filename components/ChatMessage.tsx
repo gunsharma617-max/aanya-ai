@@ -3,9 +3,10 @@ import type { ChatMessage as ChatMessageType } from "@/lib/aanya";
 
 interface ChatMessageProps {
   message: ChatMessageType;
+  isStreaming?: boolean;
 }
 
-export default function ChatMessage({ message }: ChatMessageProps) {
+export default function ChatMessage({ message, isStreaming }: ChatMessageProps) {
   const isAanya = message.role === "assistant";
 
   return (
@@ -30,6 +31,9 @@ export default function ChatMessage({ message }: ChatMessageProps) {
         ].join(" ")}
       >
         {message.content}
+        {isStreaming && isAanya && (
+          <span className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[2px] animate-pulse bg-[var(--accent)]" />
+        )}
       </div>
     </div>
   );
