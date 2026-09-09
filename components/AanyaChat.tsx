@@ -59,7 +59,12 @@ export default function AanyaChat() {
     useRef<HTMLDivElement>(null);
 
   const chatAbortRef =
-    useRef<AbortController | null>(null);
+    useRef<AbortController | null>(
+      null
+    );
+
+  const voiceEnabledRef =
+    useRef(true);
 
   useEffect(() => {
     const saved =
@@ -75,6 +80,9 @@ export default function AanyaChat() {
   }, []);
 
   useEffect(() => {
+    voiceEnabledRef.current =
+      voiceEnabled;
+
     localStorage.setItem(
       VOICE_PREF_KEY,
       String(voiceEnabled)
@@ -93,8 +101,8 @@ export default function AanyaChat() {
 
     voiceQueue.onError(() => {
       setError(
-        (prev) =>
-          prev ??
+        (previous) =>
+          previous ??
           "Aanya's voice had trouble with part of that reply."
       );
     });
@@ -108,8 +116,7 @@ export default function AanyaChat() {
   useEffect(() => {
     scrollRef.current?.scrollTo({
       top:
-        scrollRef.current
-          .scrollHeight,
+        scrollRef.current.scrollHeight,
       behavior: "smooth",
     });
   }, [messages, phase]);
@@ -127,12 +134,12 @@ export default function AanyaChat() {
     setError(null);
 
     /*
-     * New input always wins.
+     * New request always wins.
      *
      * Abort:
-     * - previous Gemini generation
-     * - previous TTS
-     * - previous audio
+     * 1. Previous Gemini request
+     * 2. Previous TTS requests
+     * 3. Previous audio playback
      */
     chatAbortRef.current?.abort();
 
@@ -159,23 +166,21 @@ export default function AanyaChat() {
       createdAt: Date.now(),
     };
 
-    const historyForApi =
-      [...messages, userMessage]
-        .map((message) => ({
-          role: message.role,
-          content:
-            message.content,
-        }));
+    const historyForApi = [
+      ...messages,
+      userMessage,
+    ].map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
 
-    setMessages((prev) => [
-      ...prev,
+    setMessages((previous) => [
+      ...previous,
       userMessage,
       assistantMessage,
     ]);
 
-    setStreamingId(
-      assistantId
-    );
+    setStreamingId(assistantId);
 
     setPhase("thinking");
 
@@ -185,7 +190,16 @@ export default function AanyaChat() {
     chatAbortRef.current =
       controller;
 
-    if (voiceEnabled) {
+    /*
+     * IMPORTANT:
+     *
+     * Start AudioContext synchronously from
+     * the send action.
+     *
+     * This is required for Android/mobile
+     * browser user-activation rules.
+     */
+    if (voiceEnabledRef.current) {
       voiceQueue.start("Leda");
     }
 
@@ -194,8 +208,9 @@ export default function AanyaChat() {
     let gotFirstToken = false;
 
     try {
-      const res =
-        await fetch("/api/chat", {
+      const response = await fetch(
+        "/api/chat",
+        {
           method: "POST",
 
           headers: {
@@ -210,22 +225,20 @@ export default function AanyaChat() {
             messages:
               historyForApi,
           }),
-        });
+        }
+      );
 
       if (
-        !res.ok ||
-        !res.body
+        !response.ok ||
+        !response.body
       ) {
-        const body:
-          ChatErrorBody =
-          await res
+        const body: ChatErrorBody =
+          await response
             .json()
-            .catch(
-              () => ({
-                error:
-                  FALLBACK_ERROR,
-              })
-            );
+            .catch(() => ({
+              error:
+                FALLBACK_ERROR,
+            }));
 
         throw new Error(
           body.error ||
@@ -234,7 +247,7 @@ export default function AanyaChat() {
       }
 
       const reader =
-        res.body.getReader();
+        response.body.getReader();
 
       const decoder =
         new TextDecoder();
@@ -250,25 +263,17 @@ export default function AanyaChat() {
       const processEvent = (
         frame: string
       ): boolean => {
-        const dataLines =
-          frame
-            .split("\n")
-            .filter(
-              (line) =>
-                line.startsWith(
-                  "data:"
-                )
-            )
-            .map(
-              (line) =>
-                line
-                  .slice(5)
-                  .trim()
-            );
+        const dataLines = frame
+          .split(/\r\n|\n|\r/)
+          .filter((line) =>
+            line.startsWith("data:")
+          )
+          .map((line) =>
+            line.slice(5).trim()
+          );
 
         if (
-          dataLines.length ===
-          0
+          dataLines.length === 0
         ) {
           return false;
         }
@@ -289,11 +294,11 @@ export default function AanyaChat() {
           return true;
         }
 
-        let evt:
+        let event:
           ChatStreamEvent;
 
         try {
-          evt =
+          event =
             JSON.parse(
               payload
             ) as ChatStreamEvent;
@@ -304,34 +309,29 @@ export default function AanyaChat() {
           return true;
         }
 
-        if (evt.error) {
+        if (event.error) {
           streamError =
-            evt.error;
+            event.error;
 
           return true;
         }
 
-        if (evt.delta) {
-          if (
-            !gotFirstToken
-          ) {
-            gotFirstToken =
-              true;
+        if (event.delta) {
+          if (!gotFirstToken) {
+            gotFirstToken = true;
 
             setPhase(
               "generating"
             );
           }
 
-          fullText +=
-            evt.delta;
+          fullText += event.delta;
 
-          ttsBuffer +=
-            evt.delta;
+          ttsBuffer += event.delta;
 
           setMessages(
-            (prev) =>
-              prev.map(
+            (previous) =>
+              previous.map(
                 (message) =>
                   message.id ===
                   assistantId
@@ -344,7 +344,9 @@ export default function AanyaChat() {
               )
           );
 
-          if (voiceEnabled) {
+          if (
+            voiceEnabledRef.current
+          ) {
             const {
               sentences,
               rest,
@@ -353,10 +355,11 @@ export default function AanyaChat() {
                 ttsBuffer
               );
 
-            ttsBuffer =
-              rest;
+            ttsBuffer = rest;
 
-            for (const sentence of sentences) {
+            for (
+              const sentence of sentences
+            ) {
               voiceQueue.enqueue(
                 sentence
               );
@@ -364,7 +367,7 @@ export default function AanyaChat() {
           }
         }
 
-        if (evt.done) {
+        if (event.done) {
           streamDone = true;
           return true;
         }
@@ -372,65 +375,60 @@ export default function AanyaChat() {
         return false;
       };
 
-      const processBufferedEvents = (
-        flush = false
-      ): boolean => {
-        /*
-         * Make the client parser tolerate:
-         *
-         * \n\n
-         * \r\n\r\n
-         * \r\r
-         *
-         * and CRLF split across network chunks.
-         */
-        buffer = buffer
-          .replace(
-            /\r\n/g,
-            "\n"
-          )
-          .replace(
-            /\r/g,
-            "\n"
-          );
+      const processBufferedEvents =
+        (
+          flush = false
+        ): boolean => {
+          while (true) {
+            const delimiter =
+              findSseDelimiter(
+                buffer
+              );
 
-        const frames =
-          buffer.split(
-            "\n\n"
-          );
+            if (
+              delimiter === -1
+            ) {
+              break;
+            }
 
-        buffer =
-          frames.pop() ?? "";
+            const frame =
+              buffer.slice(
+                0,
+                delimiter
+              );
 
-        for (const frame of frames) {
-          if (
-            processEvent(frame)
-          ) {
-            return true;
+            buffer =
+              buffer.slice(
+                delimiter +
+                  sseDelimiterLength(
+                    buffer,
+                    delimiter
+                  )
+              );
+
+            if (
+              processEvent(frame)
+            ) {
+              return true;
+            }
           }
-        }
 
-        /*
-         * Never drop an SSE event just because
-         * the upstream connection ended without
-         * a final blank line.
-         */
-        if (
-          flush &&
-          buffer.trim()
-        ) {
-          const finalFrame =
-            buffer;
+          if (
+            flush &&
+            buffer.trim()
+          ) {
+            const finalFrame =
+              buffer;
 
-          buffer = "";
+            buffer = "";
 
-          return processEvent(
-            finalFrame
-          );
-        }
+            return processEvent(
+              finalFrame
+            );
+          }
 
-        return false;
-      };
+          return false;
+        };
 
       while (!streamDone) {
         const {
@@ -439,9 +437,6 @@ export default function AanyaChat() {
         } = await reader.read();
 
         if (done) {
-          /*
-           * Flush TextDecoder and final SSE event.
-           */
           buffer +=
             decoder.decode();
 
@@ -477,15 +472,15 @@ export default function AanyaChat() {
         );
       }
 
-      if (
-        !fullText.trim()
-      ) {
+      if (!fullText.trim()) {
         throw new Error(
           FALLBACK_ERROR
         );
       }
 
-      if (voiceEnabled) {
+      if (
+        voiceEnabledRef.current
+      ) {
         if (
           ttsBuffer.trim()
         ) {
@@ -499,12 +494,10 @@ export default function AanyaChat() {
 
       setPhase("idle");
     } catch (err) {
-      if (
-        isAbortError(err)
-      ) {
+      if (isAbortError(err)) {
         /*
-         * This request was intentionally
-         * superseded by a newer one.
+         * Old request was replaced by a
+         * newer request.
          */
         return;
       }
@@ -520,8 +513,8 @@ export default function AanyaChat() {
       setPhase("error");
 
       setMessages(
-        (prev) =>
-          prev.filter(
+        (previous) =>
+          previous.filter(
             (message) =>
               message.id !==
                 assistantId ||
@@ -530,10 +523,11 @@ export default function AanyaChat() {
       );
     } finally {
       setStreamingId(
-        (id) =>
-          id === assistantId
+        (currentId) =>
+          currentId ===
+          assistantId
             ? null
-            : id
+            : currentId
       );
 
       if (
@@ -598,8 +592,7 @@ export default function AanyaChat() {
           type="button"
           onClick={() =>
             setVoiceEnabled(
-              (value) =>
-                !value
+              (value) => !value
             )
           }
           aria-label={
@@ -692,6 +685,56 @@ export default function AanyaChat() {
   );
 }
 
+function findSseDelimiter(
+  value: string
+): number {
+  let best = -1;
+
+  for (const delimiter of [
+    "\r\n\r\n",
+    "\n\n",
+    "\r\r",
+  ]) {
+    const index =
+      value.indexOf(delimiter);
+
+    if (
+      index !== -1 &&
+      (best === -1 ||
+        index < best)
+    ) {
+      best = index;
+    }
+  }
+
+  return best;
+}
+
+function sseDelimiterLength(
+  value: string,
+  index: number
+): number {
+  if (
+    value.startsWith(
+      "\r\n\r\n",
+      index
+    )
+  ) {
+    return 4;
+  }
+
+  if (
+    value.startsWith(
+      "\n\n",
+      index
+    )
+  ) {
+    return 2;
+  }
+
+  return 2;
+}
+
 function WelcomeState() {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 py-14 text-center">
@@ -727,9 +770,11 @@ function TypingIndicator() {
 
       <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface-raised)] px-4 py-3.5">
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
+
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
       </div>
     </div>
   );
-      }
+        }
