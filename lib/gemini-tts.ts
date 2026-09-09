@@ -1,176 +1,260 @@
-let audioContext: AudioContext | null = null;
-let currentSource: AudioBufferSourceNode | null = null;
+/**
+ * Streaming-friendly voice player for Aanya's Gemini TTS.
+ *
+ * Sentences are pushed in one at a time as the chat reply streams in —
+ * enqueue() can be called repeatedly while more text is still arriving.
+ * finish() marks that no more sentences are coming for this reply.
+ *
+ * - Only one AudioContext / one active queue at a time (singleton).
+ * - Starting a new reply always cancels whatever was queued or playing.
+ * - A single sentence's TTS request failing does not stop the rest of
+ *   the reply from being spoken — it's skipped and reported via onError.
+ */
 
-// Increments every time speak() starts or stop() is called,
-// so an in-flight sentence queue can detect it's been cancelled.
-let activeToken = 0;
+const TTS_TIMEOUT_MS = 15000;
 
-function getAudioContext(): AudioContext {
-  if (!audioContext) {
-    audioContext = new AudioContext();
+export type SpeakingListener = (speaking: boolean) => void;
+export type ErrorListener = (err: Error) => void;
+
+class AanyaVoiceQueue {
+  private audioContext: AudioContext | null = null;
+  private currentSource: AudioBufferSourceNode | null = null;
+  private queue: string[] = [];
+  private activeToken = 0;
+  private processing = false;
+  private streamFinished = true;
+  private voice = "Leda";
+  private speaking = false;
+  private speakingListeners = new Set<SpeakingListener>();
+  private errorListener: ErrorListener | null = null;
+
+  private getContext(): AudioContext {
+    if (!this.audioContext) {
+      this.audioContext = new AudioContext();
+    }
+    return this.audioContext;
   }
 
-  return audioContext;
+  /** Subscribe to speaking-state changes. Fires immediately with the current value. */
+  onSpeakingChange(listener: SpeakingListener): () => void {
+    this.speakingListeners.add(listener);
+    listener(this.speaking);
+    return () => this.speakingListeners.delete(listener);
+  }
+
+  /** Set (or clear with null) a callback for non-fatal per-sentence TTS failures. */
+  onError(listener: ErrorListener | null): void {
+    this.errorListener = listener;
+  }
+
+  isSpeaking(): boolean {
+    return this.speaking;
+  }
+
+  /** Begin a fresh reply. Cancels anything still queued/playing from before. */
+  start(voice = "Leda"): void {
+    this.cancel();
+    this.activeToken++;
+    this.voice = voice;
+    this.streamFinished = false;
+  }
+
+  /** Queue another finished sentence for speech. */
+  enqueue(text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.queue.push(trimmed);
+    void this.runLoop(this.activeToken);
+  }
+
+  /** Call once the text stream has ended — no more sentences are coming. */
+  finish(): void {
+    this.streamFinished = true;
+  }
+
+  /** Stop everything immediately: playback, pending fetches, the queue. */
+  cancel(): void {
+    this.activeToken++;
+    this.queue = [];
+    this.streamFinished = true;
+
+    if (this.currentSource) {
+      try {
+        this.currentSource.stop();
+      } catch {
+        // Already stopped.
+      }
+      try {
+        this.currentSource.disconnect();
+      } catch {
+        // Already disconnected.
+      }
+      this.currentSource = null;
+    }
+
+    this.setSpeaking(false);
+  }
+
+  private setSpeaking(value: boolean): void {
+    if (this.speaking === value) return;
+    this.speaking = value;
+    this.speakingListeners.forEach((l) => l(value));
+  }
+
+  private async runLoop(token: number): Promise<void> {
+    if (this.processing) return;
+    this.processing = true;
+
+    const context = this.getContext();
+    try {
+      if (context.state === "suspended") {
+        await context.resume();
+      }
+    } catch {
+      // Will implicitly retry on the next user gesture.
+    }
+
+    let prefetched: Promise<AudioBuffer | null> | null = null;
+
+    while (token === this.activeToken) {
+      let bufferPromise: Promise<AudioBuffer | null>;
+
+      if (prefetched) {
+        bufferPromise = prefetched;
+        prefetched = null;
+      } else {
+        const text = this.queue.shift();
+        if (!text) {
+          if (this.streamFinished) break;
+          await sleep(50);
+          continue;
+        }
+        bufferPromise = this.fetchBuffer(text, this.voice, context);
+      }
+
+      const buffer = await bufferPromise;
+      if (token !== this.activeToken) break;
+
+      if (!buffer) {
+        // This sentence failed TTS — skip it, keep the rest of the reply going.
+        continue;
+      }
+
+      // Prefetch the next sentence (if one's already queued) while this one
+      // plays, so there's no dead air between sentences.
+      const nextText = this.queue.shift();
+      if (nextText) {
+        prefetched = this.fetchBuffer(nextText, this.voice, context);
+      }
+
+      this.setSpeaking(true);
+      await this.playBuffer(context, buffer, token);
+    }
+
+    if (token === this.activeToken) {
+      this.setSpeaking(false);
+    }
+
+    this.processing = false;
+  }
+
+  private async fetchBuffer(
+    text: string,
+    voice: string,
+    context: AudioContext
+  ): Promise<AudioBuffer | null> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), TTS_TIMEOUT_MS);
+
+    try {
+      const response = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ text, voice }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Gemini TTS failed: ${response.status}`);
+      }
+
+      const audioData = await response.arrayBuffer();
+      if (!audioData.byteLength) {
+        throw new Error("Gemini TTS returned empty audio.");
+      }
+
+      return await context.decodeAudioData(audioData);
+    } catch (err) {
+      this.errorListener?.(err instanceof Error ? err : new Error(String(err)));
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private playBuffer(
+    context: AudioContext,
+    buffer: AudioBuffer,
+    token: number
+  ): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (token !== this.activeToken) {
+        resolve();
+        return;
+      }
+
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      this.currentSource = source;
+
+      source.onended = () => {
+        if (this.currentSource === source) {
+          this.currentSource = null;
+        }
+        resolve();
+      };
+
+      try {
+        source.start(0);
+      } catch {
+        resolve();
+      }
+    });
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
- * Splits a reply into sentence-sized chunks so we can start
- * speaking the first one immediately instead of waiting for
- * Gemini to generate audio for the entire message.
+ * Pulls finished sentences off the front of a growing text buffer so they
+ * can be sent to TTS the moment they're complete, without waiting for the
+ * whole reply. Whatever hasn't ended in sentence punctuation yet comes
+ * back as `rest` and should be prepended to the next chunk.
  */
-function splitIntoSentences(text: string): string[] {
-  const trimmed = text.trim();
+export function splitCompletedSentences(buffer: string): {
+  sentences: string[];
+  rest: string;
+} {
+  const matches = buffer.match(/[^.!?।]*[.!?।]+(?:["')\]]+)?\s*/g);
 
-  if (!trimmed) {
-    return [];
+  if (!matches) {
+    return { sentences: [], rest: buffer };
   }
 
-  const parts = trimmed
-    .split(/(?<=[.!?])\s+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
+  const sentences: string[] = [];
+  let consumed = 0;
 
-  return parts.length ? parts : [trimmed];
+  for (const m of matches) {
+    const trimmed = m.trim();
+    if (trimmed) sentences.push(trimmed);
+    consumed += m.length;
+  }
+
+  return { sentences, rest: buffer.slice(consumed) };
 }
 
-async function fetchGeminiAudioBuffer(
-  text: string,
-  voice: string,
-  context: AudioContext
-): Promise<AudioBuffer> {
-  const response = await fetch("/api/tts", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      text,
-      voice,
-    }),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-
-    throw new Error(
-      `Gemini TTS failed: ${response.status} ${errorText}`
-    );
-  }
-
-  const audioData = await response.arrayBuffer();
-
-  if (!audioData.byteLength) {
-    throw new Error("Gemini returned empty audio.");
-  }
-
-  return context.decodeAudioData(audioData);
-}
-
-function playAudioBuffer(
-  context: AudioContext,
-  buffer: AudioBuffer
-): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const source = context.createBufferSource();
-
-    source.buffer = buffer;
-    source.connect(context.destination);
-
-    currentSource = source;
-
-    source.onended = () => {
-      if (currentSource === source) {
-        currentSource = null;
-      }
-
-      resolve();
-    };
-
-    source.start(0);
-  });
-}
-
-export async function speakWithGemini(
-  text: string,
-  voice = "Leda"
-): Promise<void> {
-  if (!text.trim()) {
-    return;
-  }
-
-  stopGeminiSpeaking();
-
-  const myToken = ++activeToken;
-
-  const context = getAudioContext();
-
-  if (context.state === "suspended") {
-    await context.resume();
-  }
-
-  const chunks = splitIntoSentences(text);
-
-  if (!chunks.length) {
-    return;
-  }
-
-  // Start fetching the first chunk right away.
-  // (Bounds are guaranteed by the length check above.)
-  let nextChunkPromise: Promise<AudioBuffer> | null =
-    fetchGeminiAudioBuffer(chunks[0]!, voice, context);
-
-  for (let i = 0; i < chunks.length; i++) {
-    // Bail out if a newer speak() or stopGeminiSpeaking() call
-    // happened while we were awaiting.
-    if (myToken !== activeToken) {
-      return;
-    }
-
-    const buffer = await nextChunkPromise!;
-
-    if (myToken !== activeToken) {
-      return;
-    }
-
-    // While this chunk plays, prefetch the next one in the
-    // background so there's no gap between sentences.
-    const hasNext = i + 1 < chunks.length;
-
-    nextChunkPromise = hasNext
-      ? fetchGeminiAudioBuffer(chunks[i + 1]!, voice, context)
-      : null;
-
-    await playAudioBuffer(context, buffer);
-
-    if (myToken !== activeToken) {
-      return;
-    }
-  }
-}
-
-export function stopGeminiSpeaking(): void {
-  // Invalidate any in-progress sentence queue.
-  activeToken++;
-
-  if (!currentSource) {
-    return;
-  }
-
-  try {
-    currentSource.stop();
-  } catch {
-    // Audio may already have stopped.
-  }
-
-  try {
-    currentSource.disconnect();
-  } catch {
-    // Already disconnected.
-  }
-
-  currentSource = null;
-}
-
-export function isGeminiSpeaking(): boolean {
-  return currentSource !== null;
-}
+/** Singleton — there's only ever one Aanya speaking at a time. */
+export const voiceQueue = new AanyaVoiceQueue();
