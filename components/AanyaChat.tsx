@@ -22,56 +22,6 @@ const FALLBACK_ERROR =
 
 const VOICE_PREF_KEY = "aanya-voice-enabled";
 
-const QUICK_ACTIONS: { label: string; prompt: string; icon: JSX.Element }[] = [
-  {
-    label: "Research",
-    prompt: "Help me research a topic — ask me what it is.",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-        <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.8" />
-        <path d="M20 20l-4.3-4.3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    label: "Plan my day",
-    prompt: "Help me plan my day. Ask me what's on my plate.",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-        <rect x="4" y="5.5" width="16" height="14.5" rx="2.2" stroke="currentColor" strokeWidth="1.8" />
-        <path d="M4 9.5h16M8 3.5v3M16 3.5v3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    label: "Open YouTube",
-    prompt: "Open YouTube for me.",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-        <rect x="3.2" y="6" width="17.6" height="12" rx="3.5" stroke="currentColor" strokeWidth="1.8" />
-        <path d="M10.5 9.5l4.5 2.5-4.5 2.5v-5z" fill="currentColor" />
-      </svg>
-    ),
-  },
-  {
-    label: "Check weather",
-    prompt: "What's the weather like right now?",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-        <circle cx="8.5" cy="8.5" r="3" stroke="currentColor" strokeWidth="1.8" />
-        <path d="M6 18h11a3.3 3.3 0 000-6.6 5 5 0 00-9.6-1.6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-];
-
-function getGreeting() {
-  const hour = new Date().getHours();
-  if (hour < 12) return "Good morning";
-  if (hour < 17) return "Good afternoon";
-  return "Good evening";
-}
-
 export default function AanyaChat() {
   const [messages, setMessages] = useState<ChatMessageType[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -208,33 +158,34 @@ export default function AanyaChat() {
   }
 
   return (
-    <div className="mx-auto flex h-full w-full max-w-2xl flex-col overflow-hidden">
+    <div className="mx-auto flex h-full w-full max-w-2xl flex-col">
 
       {/* HEADER */}
 
-      <header className="flex items-center justify-between gap-3 border-b border-[var(--border-soft)] px-4 py-3.5 sm:px-6">
+      <header className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3.5 sm:px-6">
 
         <div className="flex items-center gap-3">
 
-          <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--gold-soft)] bg-[var(--surface)] shadow-[0_0_14px_rgba(232,184,92,0.18)]">
-            <Image
-              src="/aanya/avatar.svg"
-              alt="Aanya"
-              width={26}
-              height={26}
-              className="h-[26px] w-[26px] rounded-full"
-            />
-          </span>
+          <Image
+            src="/aanya/avatar.svg"
+            alt="Aanya"
+            width={38}
+            height={38}
+            className="h-[38px] w-[38px] rounded-full"
+          />
 
           <div className="flex flex-col leading-tight">
 
-            <span className="font-sans text-[15px] font-semibold tracking-[0.08em] text-[var(--text)]">
-              AANYA
+            <span className="font-display text-[17px] font-medium text-[var(--text)]">
+              Aanya
             </span>
 
-            <span className="flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-[var(--text-muted)]">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
-              Personal AI · Online
+            <span className="flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)]">
+
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+
+              Ready
+
             </span>
 
           </div>
@@ -253,7 +204,7 @@ export default function AanyaChat() {
               ? "Mute Aanya's voice"
               : "Unmute Aanya's voice"
           }
-          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-[var(--border-strong)] bg-[var(--surface)] text-[var(--text-muted)] transition hover:border-[var(--gold-soft)] hover:text-[var(--gold)]"
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--border)] text-[var(--text-muted)]"
         >
 
           {voiceEnabled ? (
@@ -308,7 +259,7 @@ export default function AanyaChat() {
       >
 
         {messages.length === 0 && (
-          <WelcomeState onQuickAction={handleSend} />
+          <WelcomeState />
         )}
 
         {messages.map((m) => (
@@ -346,84 +297,25 @@ export default function AanyaChat() {
    WELCOME STATE
 ================================ */
 
-function WelcomeState({
-  onQuickAction,
-}: {
-  onQuickAction: (text: string) => void;
-}) {
+function WelcomeState() {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-6 py-6 text-center">
+    <div className="flex h-full flex-col items-center justify-center gap-3 py-14 text-center">
 
-      {/* status strip */}
-      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-[10.5px] uppercase tracking-wide text-[var(--text-dim)]">
-        <span className="flex items-center gap-1">
-          <span className="h-1 w-1 rounded-full bg-emerald-400" />
-          System Online
-        </span>
-        <span className="opacity-40">·</span>
-        <span className="flex items-center gap-1">
-          <span className="h-1 w-1 rounded-full bg-emerald-400" />
-          Voice Ready
-        </span>
-        <span className="opacity-40">·</span>
-        <span className="flex items-center gap-1">
-          <span className="h-1 w-1 rounded-full bg-[var(--cyan)]" />
-          AI Core Active
-        </span>
-      </div>
+      <Image
+        src="/aanya/avatar.svg"
+        alt="Aanya"
+        width={56}
+        height={56}
+        className="h-14 w-14 rounded-full"
+      />
 
-      {/* AANYA CORE ORB */}
-      <div className="relative flex h-[168px] w-[168px] items-center justify-center">
+      <p className="font-display text-[20px] font-medium text-[var(--text)]">
+        Hi Boss 👋
+      </p>
 
-        <span className="orbit-ring-a absolute h-[168px] w-[168px] rounded-full border border-dashed border-[var(--gold-soft)]" />
-        <span className="orbit-ring-b absolute h-[132px] w-[132px] rounded-full border border-[var(--cyan-soft)]" />
-
-        <span className="core-glow absolute h-[92px] w-[92px] rounded-full bg-[radial-gradient(circle,rgba(232,184,92,0.35),transparent_70%)]" />
-
-        <span className="relative flex h-[76px] w-[76px] items-center justify-center rounded-full border border-[var(--gold-soft)] bg-[var(--surface-raised)] shadow-[0_0_30px_rgba(232,184,92,0.25)]">
-          <Image
-            src="/aanya/avatar.svg"
-            alt="Aanya"
-            width={44}
-            height={44}
-            className="h-11 w-11 rounded-full"
-          />
-        </span>
-
-      </div>
-
-      {/* GREETING */}
-      <div className="flex flex-col items-center gap-1.5">
-        <p className="font-display text-[24px] font-medium text-[var(--gold-strong)]">
-          {getGreeting()}, Boss.
-        </p>
-
-        <p className="max-w-[280px] text-[14.5px] text-[var(--text-muted)]">
-          I&apos;m ready. What are we working on?
-        </p>
-      </div>
-
-      {/* QUICK ACTIONS */}
-      <div className="grid w-full max-w-[340px] grid-cols-2 gap-2.5">
-        {QUICK_ACTIONS.map((action) => (
-          <button
-            key={action.label}
-            type="button"
-            onClick={() => onQuickAction(action.prompt)}
-            className="flex flex-col items-center gap-1.5 rounded-2xl border border-[var(--border-soft)] bg-[var(--surface)]/60 px-3 py-3.5 text-[13px] text-[var(--text-muted)] transition hover:border-[var(--gold-soft)] hover:text-[var(--gold)] active:scale-[0.97]"
-          >
-            <span className="text-[var(--gold)]">{action.icon}</span>
-            {action.label}
-          </button>
-        ))}
-      </div>
-
-      {/* TAGLINE */}
-      <div className="flex items-center gap-3 text-[10px] uppercase tracking-wide text-[var(--text-dim)]">
-        <span className="h-px w-8 bg-[var(--border)]" />
-        Your Personal AI Operating System
-        <span className="h-px w-8 bg-[var(--border)]" />
-      </div>
+      <p className="max-w-xs text-[14.5px] text-[var(--text-muted)]">
+        I&apos;m Aanya. What are we working on today?
+      </p>
 
     </div>
   );
@@ -435,28 +327,26 @@ function WelcomeState({
 
 function TypingIndicator() {
   return (
-    <div className="msg-in flex items-center gap-2.5">
+    <div className="flex items-center gap-2.5">
 
-      <span className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full border border-[var(--gold-soft)] bg-[var(--surface-raised)]">
-        <Image
-          src="/aanya/avatar.svg"
-          alt="Aanya"
-          width={22}
-          height={22}
-          className="h-[22px] w-[22px] rounded-full"
-        />
-      </span>
+      <Image
+        src="/aanya/avatar.svg"
+        alt="Aanya"
+        width={30}
+        height={30}
+        className="h-[30px] w-[30px] shrink-0 rounded-full"
+      />
 
-      <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-[var(--border-soft)] bg-[var(--surface-raised)]/90 px-4 py-3.5">
+      <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm border border-[var(--border)] bg-[var(--surface-raised)] px-4 py-3.5">
 
-        <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--gold)]" />
+        <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
 
-        <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--gold)]" />
+        <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
 
-        <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--gold)]" />
+        <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
 
       </div>
 
     </div>
   );
-        }
+}
