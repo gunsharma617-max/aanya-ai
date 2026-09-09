@@ -115,8 +115,9 @@ export async function speakWithGemini(
   }
 
   // Start fetching the first chunk right away.
+  // (Bounds are guaranteed by the length check above.)
   let nextChunkPromise: Promise<AudioBuffer> | null =
-    fetchGeminiAudioBuffer(chunks[0], voice, context);
+    fetchGeminiAudioBuffer(chunks[0]!, voice, context);
 
   for (let i = 0; i < chunks.length; i++) {
     // Bail out if a newer speak() or stopGeminiSpeaking() call
@@ -133,10 +134,11 @@ export async function speakWithGemini(
 
     // While this chunk plays, prefetch the next one in the
     // background so there's no gap between sentences.
-    nextChunkPromise =
-      i + 1 < chunks.length
-        ? fetchGeminiAudioBuffer(chunks[i + 1], voice, context)
-        : null;
+    const hasNext = i + 1 < chunks.length;
+
+    nextChunkPromise = hasNext
+      ? fetchGeminiAudioBuffer(chunks[i + 1]!, voice, context)
+      : null;
 
     await playAudioBuffer(context, buffer);
 
@@ -171,4 +173,4 @@ export function stopGeminiSpeaking(): void {
 
 export function isGeminiSpeaking(): boolean {
   return currentSource !== null;
-}
+    }
