@@ -1,6 +1,8 @@
 let audioContext: AudioContext | null = null;
 let currentSource: AudioBufferSourceNode | null = null;
 
+// Increments every time speak() starts or stop() is called,
+// so an in-flight sentence queue can detect it's been cancelled.
 let activeToken = 0;
 
 function getAudioContext(): AudioContext {
@@ -12,68 +14,23 @@ function getAudioContext(): AudioContext {
 }
 
 /**
- * Removes markdown formatting so Gemini doesn't read symbols like
- * "**" or "#" out loud. Only affects what gets SPOKEN — the
- * on-screen chat bubble text is completely untouched.
+ * Splits a reply into sentence-sized chunks so we can start
+ * speaking the first one immediately instead of waiting for
+ * Gemini to generate audio for the entire message.
  */
-function stripMarkdownForSpeech(text: string): string {
-  return text
-    .replace(/\*\*(.*?)\*\*/g, "$1")
-    .replace(/\*(.*?)\*/g, "$1")
-    .replace(/__(.*?)__/g, "$1")
-    .replace(/`([^`]*)`/g, "$1")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/[ \t]+/g, " ")
-    .trim();
-}
+function splitIntoSentences(text: string): string[] {
+  const trimmed = text.trim();
 
-/**
- * Splits a reply into speech-friendly chunks:
- * - the FIRST chunk is a single short sentence, so playback can
- *   start almost immediately
- * - everything after that is grouped into a small number of
- *   larger chunks, so a normal reply needs only 2-3 Gemini TTS
- *   requests total instead of one per sentence (which was slow,
- *   choppy, and easy to rate-limit).
- */
-function chunkForSpeech(text: string): string[] {
-  const cleaned = stripMarkdownForSpeech(text);
-
-  if (!cleaned) {
+  if (!trimmed) {
     return [];
   }
 
-  const sentences = cleaned
+  const parts = trimmed
     .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
+    .map((p) => p.trim())
     .filter(Boolean);
 
-  if (sentences.length <= 1) {
-    return [cleaned];
-  }
-
-  const [first, ...rest] = sentences;
-  const chunks: string[] = [first];
-
-  const MAX_CHUNK_LEN = 420;
-  let current = "";
-
-  for (const sentence of rest) {
-    const candidate = current ? `${current} ${sentence}` : sentence;
-
-    if (current && candidate.length > MAX_CHUNK_LEN) {
-      chunks.push(current);
-      current = sentence;
-    } else {
-      current = candidate;
-    }
-  }
-
-  if (current) {
-    chunks.push(current);
-  }
-
-  return chunks;
+  return parts.length ? parts : [trimmed];
 }
 
 async function fetchGeminiAudioBuffer(
@@ -151,61 +108,48 @@ export async function speakWithGemini(
     await context.resume();
   }
 
-  const chunks = chunkForSpeech(text);
+  const chunks = splitIntoSentences(text);
 
   if (!chunks.length) {
     return;
   }
 
-  // Start fetching the first chunk right away. If it fails, we
-  // swallow the error here so one bad chunk doesn't silence the
-  // whole reply — we just skip it and move on.
-  let nextChunkPromise: Promise<AudioBuffer | null> | null =
-    fetchGeminiAudioBuffer(chunks[0]!, voice, context).catch((error) => {
-      console.error("Aanya TTS chunk failed:", error);
-      return null;
-    });
-
-  let anySucceeded = false;
+  // Start fetching the first chunk right away.
+  // (Bounds are guaranteed by the length check above.)
+  let nextChunkPromise: Promise<AudioBuffer> | null =
+    fetchGeminiAudioBuffer(chunks[0]!, voice, context);
 
   for (let i = 0; i < chunks.length; i++) {
+    // Bail out if a newer speak() or stopGeminiSpeaking() call
+    // happened while we were awaiting.
     if (myToken !== activeToken) {
       return;
     }
 
-    const buffer = await nextChunkPromise;
+    const buffer = await nextChunkPromise!;
 
     if (myToken !== activeToken) {
       return;
     }
 
+    // While this chunk plays, prefetch the next one in the
+    // background so there's no gap between sentences.
     const hasNext = i + 1 < chunks.length;
 
     nextChunkPromise = hasNext
-      ? fetchGeminiAudioBuffer(chunks[i + 1]!, voice, context).catch(
-          (error) => {
-            console.error("Aanya TTS chunk failed:", error);
-            return null;
-          }
-        )
+      ? fetchGeminiAudioBuffer(chunks[i + 1]!, voice, context)
       : null;
 
-    if (buffer) {
-      anySucceeded = true;
-      await playAudioBuffer(context, buffer);
+    await playAudioBuffer(context, buffer);
 
-      if (myToken !== activeToken) {
-        return;
-      }
+    if (myToken !== activeToken) {
+      return;
     }
-  }
-
-  if (!anySucceeded) {
-    throw new Error("Gemini TTS failed for every part of the reply.");
   }
 }
 
 export function stopGeminiSpeaking(): void {
+  // Invalidate any in-progress sentence queue.
   activeToken++;
 
   if (!currentSource) {
