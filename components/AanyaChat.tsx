@@ -30,6 +30,12 @@ const FALLBACK_ERROR =
 const VOICE_PREF_KEY =
   "aanya-voice-enabled";
 
+/*
+ * Voice should start early instead of waiting
+ * for a complete long paragraph.
+ */
+const EARLY_TTS_CHUNK_SIZE = 45;
+
 type Phase =
   | "idle"
   | "thinking"
@@ -66,6 +72,13 @@ export default function AanyaChat() {
   const voiceEnabledRef =
     useRef(true);
 
+  /*
+   * Prevents an old request from updating
+   * the UI after a new request starts.
+   */
+  const requestIdRef =
+    useRef(0);
+
   useEffect(() => {
     const saved =
       localStorage.getItem(
@@ -100,6 +113,11 @@ export default function AanyaChat() {
       );
 
     voiceQueue.onError(() => {
+      /*
+       * TTS errors should NOT destroy the
+       * text response. We only show the
+       * small voice warning.
+       */
       setError(
         (previous) =>
           previous ??
@@ -131,14 +149,30 @@ export default function AanyaChat() {
   async function handleSend(
     text: string
   ) {
+    const cleanText =
+      text.trim();
+
+    if (!cleanText) {
+      return;
+    }
+
+    /*
+     * Every new question gets a new request ID.
+     */
+    const currentRequestId =
+      requestIdRef.current + 1;
+
+    requestIdRef.current =
+      currentRequestId;
+
     setError(null);
 
     /*
-     * New request always wins.
+     * NEW REQUEST ALWAYS WINS.
      *
-     * Abort:
-     * 1. Previous Gemini request
-     * 2. Previous TTS requests
+     * Stop:
+     * 1. Previous NVIDIA chat stream
+     * 2. Previous Gemini TTS requests
      * 3. Previous audio playback
      */
     chatAbortRef.current?.abort();
@@ -151,7 +185,7 @@ export default function AanyaChat() {
       ChatMessageType = {
       id: createMessageId(),
       role: "user",
-      content: text,
+      content: cleanText,
       createdAt: Date.now(),
     };
 
@@ -180,7 +214,9 @@ export default function AanyaChat() {
       assistantMessage,
     ]);
 
-    setStreamingId(assistantId);
+    setStreamingId(
+      assistantId
+    );
 
     setPhase("thinking");
 
@@ -191,16 +227,17 @@ export default function AanyaChat() {
       controller;
 
     /*
-     * IMPORTANT:
+     * IMPORTANT FOR MOBILE:
      *
-     * Start AudioContext synchronously from
-     * the send action.
-     *
-     * This is required for Android/mobile
-     * browser user-activation rules.
+     * Initialize AudioContext directly
+     * from the user's send action.
      */
-    if (voiceEnabledRef.current) {
-      voiceQueue.start("Leda");
+    if (
+      voiceEnabledRef.current
+    ) {
+      voiceQueue.start(
+        "Leda"
+      );
     }
 
     let fullText = "";
@@ -263,17 +300,36 @@ export default function AanyaChat() {
       const processEvent = (
         frame: string
       ): boolean => {
-        const dataLines = frame
-          .split(/\r\n|\n|\r/)
-          .filter((line) =>
-            line.startsWith("data:")
-          )
-          .map((line) =>
-            line.slice(5).trim()
-          );
+        /*
+         * Ignore events belonging to an
+         * obsolete request.
+         */
+        if (
+          currentRequestId !==
+          requestIdRef.current
+        ) {
+          return true;
+        }
+
+        const dataLines =
+          frame
+            .split(
+              /\r\n|\n|\r/
+            )
+            .filter((line) =>
+              line.startsWith(
+                "data:"
+              )
+            )
+            .map((line) =>
+              line
+                .slice(5)
+                .trim()
+            );
 
         if (
-          dataLines.length === 0
+          dataLines.length ===
+          0
         ) {
           return false;
         }
@@ -288,7 +344,8 @@ export default function AanyaChat() {
         }
 
         if (
-          payload === "[DONE]"
+          payload ===
+          "[DONE]"
         ) {
           streamDone = true;
           return true;
@@ -325,9 +382,17 @@ export default function AanyaChat() {
             );
           }
 
-          fullText += event.delta;
+          /*
+           * Update complete visible answer.
+           */
+          fullText +=
+            event.delta;
 
-          ttsBuffer += event.delta;
+          /*
+           * Add streamed text to voice buffer.
+           */
+          ttsBuffer +=
+            event.delta;
 
           setMessages(
             (previous) =>
@@ -344,25 +409,102 @@ export default function AanyaChat() {
               )
           );
 
-          if (voiceEnabledRef.current) {
-  const { sentences, rest } =
-    splitCompletedSentences(ttsBuffer);
-
-  ttsBuffer = rest;
-
-  for (const sentence of sentences) {
-    voiceQueue.enqueue(sentence);
-       
+          /*
+           * LOW-LATENCY VOICE
+           *
+           * This function will:
+           *
+           * 1. Speak completed sentences immediately.
+           * 2. If no punctuation has arrived yet,
+           *    release a natural short chunk around
+           *    45 characters.
+           */
+          if (
+            voiceEnabledRef.current
+          ) {
+            processVoiceBuffer();
           }
         }
 
         if (event.done) {
           streamDone = true;
+
           return true;
         }
 
         return false;
       };
+
+      /*
+       * Process current TTS buffer.
+       */
+      const processVoiceBuffer =
+        () => {
+          if (
+            !voiceEnabledRef.current
+          ) {
+            return;
+          }
+
+          /*
+           * First let the normal sentence splitter
+           * extract punctuation-based sentences.
+           */
+          const result =
+            splitCompletedSentences(
+              ttsBuffer
+            );
+
+          ttsBuffer =
+            result.rest;
+
+          for (
+            const sentence of
+              result.sentences
+          ) {
+            voiceQueue.enqueue(
+              sentence
+            );
+          }
+
+          /*
+           * If Gemini/NVIDIA is producing a long
+           * sentence without punctuation, don't wait
+           * for the entire sentence.
+           */
+          if (
+            ttsBuffer.trim()
+              .length >=
+            EARLY_TTS_CHUNK_SIZE
+          ) {
+            const cut =
+              findSpeechCut(
+                ttsBuffer,
+                EARLY_TTS_CHUNK_SIZE
+              );
+
+            if (cut > 0) {
+              const chunk =
+                ttsBuffer
+                  .slice(
+                    0,
+                    cut
+                  )
+                  .trim();
+
+              ttsBuffer =
+                ttsBuffer
+                  .slice(cut)
+                  .trimStart();
+
+              if (chunk) {
+                voiceQueue.enqueue(
+                  chunk
+                );
+              }
+            }
+          }
+        };
 
       const processBufferedEvents =
         (
@@ -396,12 +538,18 @@ export default function AanyaChat() {
               );
 
             if (
-              processEvent(frame)
+              processEvent(
+                frame
+              )
             ) {
               return true;
             }
           }
 
+          /*
+           * Some providers can close the SSE
+           * stream without the final blank line.
+           */
           if (
             flush &&
             buffer.trim()
@@ -419,11 +567,15 @@ export default function AanyaChat() {
           return false;
         };
 
+      /*
+       * Read NVIDIA streaming response.
+       */
       while (!streamDone) {
         const {
           done,
           value,
-        } = await reader.read();
+        } =
+          await reader.read();
 
         if (done) {
           buffer +=
@@ -455,42 +607,68 @@ export default function AanyaChat() {
         }
       }
 
+      /*
+       * Process any remaining text that did not
+       * contain punctuation.
+       */
+      if (
+        voiceEnabledRef.current &&
+        ttsBuffer.trim()
+      ) {
+        const remaining =
+          ttsBuffer.trim();
+
+        if (remaining) {
+          voiceQueue.enqueue(
+            remaining
+          );
+        }
+
+        ttsBuffer = "";
+      }
+
       if (streamError) {
         throw new Error(
           streamError
         );
       }
 
-      if (!fullText.trim()) {
+      if (
+        !fullText.trim()
+      ) {
         throw new Error(
           FALLBACK_ERROR
         );
       }
 
+      /*
+       * Tell voice queue that NVIDIA has finished.
+       *
+       * Gemini can still finish speaking anything
+       * already queued.
+       */
       if (
         voiceEnabledRef.current
       ) {
-        if (
-          ttsBuffer.trim()
-        ) {
-          voiceQueue.enqueue(
-            ttsBuffer
-          );
-        }
-
         voiceQueue.finish();
       }
 
       setPhase("idle");
     } catch (err) {
-      if (isAbortError(err)) {
+      if (
+        isAbortError(err) ||
+        currentRequestId !==
+          requestIdRef.current
+      ) {
         /*
-         * Old request was replaced by a
-         * newer request.
+         * Old request was replaced.
          */
         return;
       }
 
+      /*
+       * Only cancel voice for a REAL chat error.
+       */
       voiceQueue.cancel();
 
       setError(
@@ -581,7 +759,8 @@ export default function AanyaChat() {
           type="button"
           onClick={() =>
             setVoiceEnabled(
-              (value) => !value
+              (value) =>
+                !value
             )
           }
           aria-label={
@@ -638,7 +817,9 @@ export default function AanyaChat() {
         className="flex-1 space-y-4 overflow-y-auto px-4 py-5 sm:px-6"
       >
         {messages.length ===
-          0 && <WelcomeState />}
+          0 && (
+          <WelcomeState />
+        )}
 
         {messages.map(
           (message) => (
@@ -674,18 +855,25 @@ export default function AanyaChat() {
   );
 }
 
+/**
+ * Finds an SSE event delimiter.
+ */
 function findSseDelimiter(
   value: string
 ): number {
   let best = -1;
 
-  for (const delimiter of [
-    "\r\n\r\n",
-    "\n\n",
-    "\r\r",
-  ]) {
+  for (
+    const delimiter of [
+      "\r\n\r\n",
+      "\n\n",
+      "\r\r",
+    ]
+  ) {
     const index =
-      value.indexOf(delimiter);
+      value.indexOf(
+        delimiter
+      );
 
     if (
       index !== -1 &&
@@ -699,6 +887,10 @@ function findSseDelimiter(
   return best;
 }
 
+/**
+ * Returns the length of the delimiter
+ * at the specified index.
+ */
 function sseDelimiterLength(
   value: string,
   index: number
@@ -722,6 +914,72 @@ function sseDelimiterLength(
   }
 
   return 2;
+}
+
+/**
+ * Find a natural speech boundary.
+ *
+ * Prefer:
+ * 1. punctuation
+ * 2. comma
+ * 3. space
+ */
+function findSpeechCut(
+  text: string,
+  target: number
+): number {
+  const start =
+    Math.max(
+      20,
+      target - 20
+    );
+
+  const end =
+    Math.min(
+      text.length,
+      target + 15
+    );
+
+  const region =
+    text.slice(
+      start,
+      end
+    );
+
+  const punctuationCandidates = [
+    region.lastIndexOf("."),
+    region.lastIndexOf(","),
+    region.lastIndexOf("?"),
+    region.lastIndexOf("!"),
+    region.lastIndexOf("।"),
+  ];
+
+  const punctuation =
+    Math.max(
+      ...punctuationCandidates
+    );
+
+  if (
+    punctuation >= 0
+  ) {
+    return (
+      start +
+      punctuation +
+      1
+    );
+  }
+
+  const space =
+    region.lastIndexOf(" ");
+
+  if (space >= 0) {
+    return (
+      start +
+      space
+    );
+  }
+
+  return target;
 }
 
 function WelcomeState() {
@@ -765,5 +1023,5 @@ function TypingIndicator() {
         <span className="typing-dot h-1.5 w-1.5 rounded-full bg-[var(--accent)]" />
       </div>
     </div>
-  );
-        }
+    );
+}
