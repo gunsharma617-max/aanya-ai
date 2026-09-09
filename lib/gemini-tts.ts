@@ -1,10 +1,11 @@
 /**
- * Reliable voice player for Aanya's Gemini TTS.
+ * Low-latency Gemini TTS voice queue for Aanya.
  *
- * - One TTS request at a time
- * - Automatic retry on temporary TTS failures
- * - 30 second timeout
- * - Cancels old replies when a new message starts
+ * Design:
+ * - Starts speaking before the complete AI response is finished.
+ * - Keeps one audio chunk playing while preparing the next one.
+ * - Retries temporary TTS failures.
+ * - Cancels stale requests when a new user message arrives.
  */
 
 const TTS_TIMEOUT_MS = 30000;
@@ -15,15 +16,17 @@ export type ErrorListener = (err: Error) => void;
 
 class AanyaVoiceQueue {
   private audioContext: AudioContext | null = null;
+
   private currentSource: AudioBufferSourceNode | null = null;
   private currentPlaybackCancel: (() => void) | null = null;
 
   private queue: string[] = [];
+
   private activeToken = 0;
   private processing = false;
   private streamFinished = true;
-  private voice = "Leda";
 
+  private voice = "Leda";
   private speaking = false;
 
   private speakingListeners = new Set<SpeakingListener>();
@@ -35,11 +38,9 @@ class AanyaVoiceQueue {
     if (!this.audioContext) {
       const AudioContextCtor =
         window.AudioContext ||
-        (
-          window as typeof window & {
-            webkitAudioContext?: typeof AudioContext;
-          }
-        ).webkitAudioContext;
+        (window as typeof window & {
+          webkitAudioContext?: typeof AudioContext;
+        }).webkitAudioContext;
 
       if (!AudioContextCtor) {
         throw new Error(
@@ -55,6 +56,7 @@ class AanyaVoiceQueue {
 
   onSpeakingChange(listener: SpeakingListener): () => void {
     this.speakingListeners.add(listener);
+
     listener(this.speaking);
 
     return () => {
@@ -71,7 +73,7 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Start a completely new reply.
+   * Start a completely new voice response.
    */
   start(voice = "Leda"): void {
     this.cancel();
@@ -96,7 +98,7 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Add one completed sentence to the voice queue.
+   * Add a small speech chunk.
    */
   enqueue(text: string): void {
     const trimmed = text.trim();
@@ -111,7 +113,7 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Tell the voice system that the streamed answer is finished.
+   * Tell the queue that the AI response is completely finished.
    */
   finish(): void {
     this.streamFinished = true;
@@ -122,7 +124,7 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Cancel all old TTS work immediately.
+   * Cancel everything belonging to the current reply.
    */
   cancel(): void {
     this.activeToken++;
@@ -130,18 +132,16 @@ class AanyaVoiceQueue {
     this.queue = [];
     this.streamFinished = true;
 
-    // Abort every active Gemini TTS request.
     for (const controller of this.activeTtsControllers) {
       try {
         controller.abort();
       } catch {
-        // Already aborted.
+        // Ignore already-aborted controllers.
       }
     }
 
     this.activeTtsControllers.clear();
 
-    // Stop currently playing audio.
     if (this.currentSource) {
       try {
         this.currentSource.stop();
@@ -158,9 +158,7 @@ class AanyaVoiceQueue {
       this.currentSource = null;
     }
 
-    // Make sure playback promise resolves.
-    const cancelPlayback =
-      this.currentPlaybackCancel;
+    const cancelPlayback = this.currentPlaybackCancel;
 
     this.currentPlaybackCancel = null;
 
@@ -176,18 +174,16 @@ class AanyaVoiceQueue {
 
     this.speaking = value;
 
-    this.speakingListeners.forEach(
-      (listener) => listener(value)
-    );
+    this.speakingListeners.forEach((listener) => {
+      listener(value);
+    });
   }
 
   /**
-   * Process sentences ONE BY ONE.
+   * Main playback loop.
    *
-   * Important:
-   * We intentionally do NOT prefetch the next sentence.
-   * This prevents multiple Gemini TTS requests from running
-   * at the same time.
+   * We allow ONE next TTS request to be prepared while the current
+   * audio is playing. This reduces gaps without flooding Gemini.
    */
   private async runLoop(token: number): Promise<void> {
     if (this.processing) {
@@ -195,6 +191,8 @@ class AanyaVoiceQueue {
     }
 
     this.processing = true;
+
+    let prefetched: Promise<AudioBuffer | null> | null = null;
 
     try {
       const context = this.getContext();
@@ -204,43 +202,70 @@ class AanyaVoiceQueue {
           await context.resume();
         }
       } catch {
-        // Browser may resume it after the user gesture.
+        // Browser may resume it automatically after interaction.
       }
 
       while (token === this.activeToken) {
-        const text = this.queue.shift();
+        let bufferPromise: Promise<AudioBuffer | null>;
 
-        if (!text) {
-          if (this.streamFinished) {
-            break;
+        /*
+         * Use the already-prepared next chunk if available.
+         */
+        if (prefetched) {
+          bufferPromise = prefetched;
+          prefetched = null;
+        } else {
+          const text = this.queue.shift();
+
+          if (!text) {
+            if (this.streamFinished) {
+              break;
+            }
+
+            await sleep(30);
+            continue;
           }
 
-          await sleep(50);
-          continue;
-        }
-
-        // Generate audio for exactly ONE sentence.
-        const buffer =
-          await this.fetchBufferWithRetry(
+          bufferPromise = this.fetchBufferWithRetry(
             text,
             this.voice,
             context,
             token
           );
+        }
+
+        const buffer = await bufferPromise;
 
         if (token !== this.activeToken) {
           break;
         }
 
         if (!buffer) {
-          // Continue with the next sentence instead of
-          // killing the complete voice response.
           continue;
+        }
+
+        /*
+         * Prepare ONLY ONE next chunk.
+         *
+         * This is intentionally limited to one request.
+         */
+        const nextText = this.queue.shift();
+
+        if (nextText) {
+          prefetched = this.fetchBufferWithRetry(
+            nextText,
+            this.voice,
+            context,
+            token
+          );
+        }
+
+        if (token !== this.activeToken) {
+          break;
         }
 
         this.setSpeaking(true);
 
-        // Wait until this sentence completely finishes.
         await this.playBuffer(
           context,
           buffer,
@@ -254,23 +279,14 @@ class AanyaVoiceQueue {
 
       this.processing = false;
 
-      // If something arrived while the loop was finishing,
-      // continue processing it.
       if (this.queue.length > 0) {
-        if (
-          token !== this.activeToken ||
-          !this.streamFinished
-        ) {
-          void this.runLoop(this.activeToken);
-        } else {
-          void this.runLoop(token);
-        }
+        void this.runLoop(this.activeToken);
       }
     }
   }
 
   /**
-   * Generate TTS with automatic retry.
+   * Retry Gemini TTS a couple of times when a request temporarily fails.
    */
   private async fetchBufferWithRetry(
     text: string,
@@ -287,32 +303,32 @@ class AanyaVoiceQueue {
         return null;
       }
 
-      const result =
-        await this.fetchBuffer(
-          text,
-          voice,
-          context,
-          token
-        );
+      const buffer = await this.fetchBuffer(
+        text,
+        voice,
+        context,
+        token
+      );
 
-      if (result) {
-        return result;
+      if (buffer) {
+        return buffer;
       }
 
       if (token !== this.activeToken) {
         return null;
       }
 
-      // Small delay before retry.
       if (attempt < MAX_RETRIES) {
-        await sleep(500 * (attempt + 1));
+        await sleep(
+          400 * (attempt + 1)
+        );
       }
     }
 
     if (token === this.activeToken) {
       this.errorListener?.(
         new Error(
-          "Gemini TTS could not generate this part of the reply."
+          "Aanya's voice could not generate one part of the reply."
         )
       );
     }
@@ -389,21 +405,21 @@ class AanyaVoiceQueue {
         audioData
       );
     } catch (error) {
-      const aborted =
+      const isAbort =
         error instanceof DOMException &&
         error.name === "AbortError";
 
-      const namedAbort =
+      const isNamedAbort =
         error instanceof Error &&
         error.name === "AbortError";
 
       if (
-        !aborted &&
-        !namedAbort &&
+        !isAbort &&
+        !isNamedAbort &&
         token === this.activeToken
       ) {
         console.error(
-          "Aanya TTS request failed:",
+          "Aanya TTS error:",
           error
         );
       }
@@ -419,7 +435,7 @@ class AanyaVoiceQueue {
   }
 
   /**
-   * Play one generated audio buffer.
+   * Play one audio buffer.
    */
   private playBuffer(
     context: AudioContext,
@@ -479,8 +495,7 @@ class AanyaVoiceQueue {
           resolve();
         };
 
-        source.onended =
-          finish;
+        source.onended = finish;
 
         this.currentPlaybackCancel =
           finish;
@@ -507,50 +522,178 @@ function sleep(
   );
 }
 
+/**
+ * Converts streamed AI text into low-latency speech chunks.
+ *
+ * Normal sentences stay intact.
+ *
+ * Very long sentences are split around ~80 characters so Aanya
+ * does not wait for the entire paragraph before starting to speak.
+ */
 export function splitCompletedSentences(
   buffer: string
 ): {
   sentences: string[];
   rest: string;
 } {
+  const results: string[] = [];
+
+  let remaining = buffer;
+
+  /*
+   * First extract completed punctuation-based sentences.
+   */
+  const sentenceRegex =
+    /[^.!?।]*[.!?।]+(?:["')\]]+)?\s*/g;
+
   const matches =
-    buffer.match(
-      /[^.!?।]*[.!?।]+(?:["')\]]+)?\s*/g
-    );
-
-  if (!matches) {
-    return {
-      sentences: [],
-      rest: buffer,
-    };
-  }
-
-  const sentences: string[] = [];
+    remaining.match(sentenceRegex);
 
   let consumed = 0;
 
-  for (
-    const match of matches
-  ) {
-    const trimmed =
-      match.trim();
+  if (matches) {
+    for (const match of matches) {
+      const trimmed = match.trim();
 
-    if (trimmed) {
-      sentences.push(
-        trimmed
-      );
+      if (trimmed) {
+        results.push(...splitLongChunk(trimmed));
+      }
+
+      consumed += match.length;
     }
 
-    consumed +=
-      match.length;
+    remaining =
+      remaining.slice(consumed);
+  }
+
+  /*
+   * If the unfinished text has already become reasonably long,
+   * release a natural chunk without waiting for punctuation.
+   */
+  if (remaining.trim().length >= 80) {
+    const cut = findNaturalCut(
+      remaining,
+      80
+    );
+
+    if (cut > 0) {
+      const chunk =
+        remaining
+          .slice(0, cut)
+          .trim();
+
+      if (chunk) {
+        results.push(chunk);
+      }
+
+      remaining =
+        remaining.slice(cut);
+    }
   }
 
   return {
-    sentences,
-    rest: buffer.slice(
-      consumed
-    ),
+    sentences: results,
+    rest: remaining,
   };
+}
+
+/**
+ * Split an unusually long sentence into natural pieces.
+ */
+function splitLongChunk(
+  text: string
+): string[] {
+  const MAX = 90;
+
+  if (text.length <= MAX) {
+    return [text];
+  }
+
+  const result: string[] = [];
+
+  let remaining = text;
+
+  while (remaining.length > MAX) {
+    const cut =
+      findNaturalCut(
+        remaining,
+        MAX
+      );
+
+    if (cut <= 0) {
+      break;
+    }
+
+    const piece =
+      remaining
+        .slice(0, cut)
+        .trim();
+
+    if (piece) {
+      result.push(piece);
+    }
+
+    remaining =
+      remaining.slice(cut).trim();
+  }
+
+  if (remaining) {
+    result.push(remaining);
+  }
+
+  return result;
+}
+
+/**
+ * Find a good place to cut speech.
+ *
+ * Priority:
+ * comma → space → fallback.
+ */
+function findNaturalCut(
+  text: string,
+  target: number
+): number {
+  const searchStart =
+    Math.max(
+      20,
+      target - 25
+    );
+
+  const searchEnd =
+    Math.min(
+      text.length,
+      target + 10
+    );
+
+  const region =
+    text.slice(
+      searchStart,
+      searchEnd
+    );
+
+  const comma =
+    region.lastIndexOf(",");
+
+  if (comma >= 0) {
+    return (
+      searchStart +
+      comma +
+      1
+    );
+  }
+
+  const space =
+    region.lastIndexOf(" ");
+
+  if (space >= 0) {
+    return (
+      searchStart +
+      space
+    );
+  }
+
+  return target;
 }
 
 export const voiceQueue =
