@@ -9,16 +9,6 @@ const DEFAULT_MODEL = "gemini-3.5-flash";
 const MAX_MESSAGE_LENGTH = 8000;
 const MAX_HISTORY = 40;
 
-/**
- * POST /api/chat
- *
- * Streams Aanya's reply back as Server-Sent Events.
- *
- * Each event body is JSON:
- *   {"delta": "..."}   — a chunk of new text
- *   {"done": true}     — the reply is complete
- *   {"error": "..."}   — something failed
- */
 export async function POST(req: NextRequest) {
   let body: ChatRequestBody;
 
@@ -29,6 +19,7 @@ export async function POST(req: NextRequest) {
   }
 
   const validation = validateBody(body);
+
   if (!validation.ok) {
     return errorResponse(validation.reason, 400);
   }
@@ -44,12 +35,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Keep the configured model if it is valid. Whitespace around the value is
-  // ignored so values copied into deployment settings cannot break the URL.
   const model = (process.env.AI_MODEL?.trim() || DEFAULT_MODEL).trim();
 
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent` +
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+      model
+    )}:streamGenerateContent` +
     `?alt=sse&key=${encodeURIComponent(apiKey)}`;
 
   let upstream: Response;
@@ -63,20 +54,32 @@ export async function POST(req: NextRequest) {
       signal: req.signal,
       body: JSON.stringify({
         systemInstruction: {
-          parts: [{ text: AANYA_SYSTEM_PROMPT }],
+          parts: [
+            {
+              text: AANYA_SYSTEM_PROMPT,
+            },
+          ],
         },
-        contents: body.messages.map((m) => ({
-          role: m.role === "assistant" ? "model" : "user",
-          parts: [{ text: m.content }],
+
+        contents: body.messages.map((message) => ({
+          role: message.role === "assistant" ? "model" : "user",
+
+          parts: [
+            {
+              text: message.content,
+            },
+          ],
         })),
       }),
     });
-  } catch (err) {
-    if (isAbortError(err)) {
-      return new Response(null, { status: 499 });
+  } catch (error) {
+    if (isAbortError(error)) {
+      return new Response(null, {
+        status: 499,
+      });
     }
 
-    console.error("Chat route failure (network):", err);
+    console.error("Chat route network failure:", error);
 
     return errorResponse(
       "Sorry Boss, I couldn't connect to my AI brain right now. Please try again.",
@@ -88,7 +91,7 @@ export async function POST(req: NextRequest) {
     const detail = await safeReadText(upstream);
 
     console.error(
-      "AI provider error:",
+      "Gemini provider error:",
       upstream.status,
       detail
     );
@@ -101,7 +104,7 @@ export async function POST(req: NextRequest) {
   }
 
   const encoder = new TextEncoder();
-  const upstreamReader = upstream.body.getReader();
+  const reader = upstream.body.getReader();
   const decoder = new TextDecoder();
 
   const stream = new ReadableStream<Uint8Array>({
@@ -112,7 +115,7 @@ export async function POST(req: NextRequest) {
       let terminalError: string | null = null;
 
       const onAbort = () => {
-        void upstreamReader.cancel().catch(() => undefined);
+        void reader.cancel().catch(() => undefined);
       };
 
       req.signal.addEventListener("abort", onAbort);
@@ -123,7 +126,7 @@ export async function POST(req: NextRequest) {
             encoder.encode(sseData(payload))
           );
         } catch {
-          // Client may have disconnected.
+          // Client disconnected.
         }
       };
 
@@ -134,7 +137,6 @@ export async function POST(req: NextRequest) {
           return false;
         }
 
-        // SSE combines multiple data lines into one event payload.
         const payload = dataLines.join("\n").trim();
 
         if (!payload) {
@@ -170,8 +172,7 @@ export async function POST(req: NextRequest) {
           return true;
         }
 
-        const blockReason =
-          getBlockReason(parsed);
+        const blockReason = getBlockReason(parsed);
 
         if (blockReason) {
           terminalError =
@@ -180,8 +181,7 @@ export async function POST(req: NextRequest) {
           return true;
         }
 
-        const finishReason =
-          getFinishReason(parsed);
+        const finishReason = getFinishReason(parsed);
 
         if (
           finishReason &&
@@ -198,8 +198,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        const delta =
-          extractDeltaText(parsed);
+        const delta = extractDeltaText(parsed);
 
         if (delta) {
           sawAnyText = true;
@@ -214,48 +213,37 @@ export async function POST(req: NextRequest) {
 
       const processBufferedEvents = (
         flush = false
-      ) => {
-        /*
-         * Normalize all newline styles before parsing.
-         *
-         * Handles:
-         *   \n\n
-         *   \r\n\r\n
-         *   \r\r
-         *   CRLF split across network chunks
-         */
-        buffer = buffer
-          .replace(/\r\n/g, "\n")
-          .replace(/\r/g, "\n");
+      ): boolean => {
+        while (true) {
+          const delimiter =
+            findSseDelimiter(buffer);
 
-        const frames =
-          buffer.split("\n\n");
+          if (delimiter === -1) {
+            break;
+          }
 
-        buffer =
-          frames.pop() ?? "";
+          const event =
+            buffer.slice(0, delimiter);
 
-        for (const frame of frames) {
-          if (processEvent(frame)) {
+          buffer = buffer.slice(
+            delimiter +
+              sseDelimiterLength(
+                buffer,
+                delimiter
+              )
+          );
+
+          if (processEvent(event)) {
             return true;
           }
         }
 
-        /*
-         * SSE allows the stream to end without a final blank line.
-         * Never silently throw away the remaining event.
-         */
-        if (
-          flush &&
-          buffer.trim()
-        ) {
-          const finalEvent =
-            buffer;
+        if (flush && buffer.trim()) {
+          const finalEvent = buffer;
 
           buffer = "";
 
-          return processEvent(
-            finalEvent
-          );
+          return processEvent(finalEvent);
         }
 
         return false;
@@ -266,18 +254,11 @@ export async function POST(req: NextRequest) {
           const {
             done,
             value,
-          } = await upstreamReader.read();
+          } = await reader.read();
 
           if (done) {
-            /*
-             * Flush any UTF-8 bytes still held by TextDecoder.
-             */
             buffer += decoder.decode();
 
-            /*
-             * Process every remaining SSE event,
-             * including an unterminated final event.
-             */
             processBufferedEvents(true);
 
             break;
@@ -324,17 +305,12 @@ export async function POST(req: NextRequest) {
           return;
         }
 
-        /*
-         * IMPORTANT:
-         * done is emitted only after the complete Gemini
-         * stream has been processed.
-         */
         emit({
           done: true,
         });
-      } catch (err) {
+      } catch (error) {
         if (
-          isAbortError(err) ||
+          isAbortError(error) ||
           req.signal.aborted
         ) {
           return;
@@ -342,7 +318,7 @@ export async function POST(req: NextRequest) {
 
         console.error(
           "Chat stream failure:",
-          err
+          error
         );
 
         emit({
@@ -364,9 +340,7 @@ export async function POST(req: NextRequest) {
     },
 
     cancel() {
-      void upstreamReader
-        .cancel()
-        .catch(() => undefined);
+      void reader.cancel().catch(() => undefined);
     },
   });
 
@@ -380,11 +354,9 @@ export async function POST(req: NextRequest) {
       "Cache-Control":
         "no-cache, no-transform",
 
-      Connection:
-        "keep-alive",
+      Connection: "keep-alive",
 
-      "X-Accel-Buffering":
-        "no",
+      "X-Accel-Buffering": "no",
     },
   });
 }
@@ -392,14 +364,16 @@ export async function POST(req: NextRequest) {
 function sseData(
   payload: Record<string, unknown>
 ): string {
-  return `data: ${JSON.stringify(payload)}\n\n`;
+  return `data: ${JSON.stringify(
+    payload
+  )}\n\n`;
 }
 
 function getSseDataLines(
   event: string
 ): string[] {
   return event
-    .split("\n")
+    .split(/\r\n|\n|\r/)
     .filter((line) =>
       line.startsWith("data:")
     )
@@ -408,14 +382,60 @@ function getSseDataLines(
     );
 }
 
+function findSseDelimiter(
+  value: string
+): number {
+  let best = -1;
+
+  for (const delimiter of [
+    "\r\n\r\n",
+    "\n\n",
+    "\r\r",
+  ]) {
+    const index =
+      value.indexOf(delimiter);
+
+    if (
+      index !== -1 &&
+      (best === -1 || index < best)
+    ) {
+      best = index;
+    }
+  }
+
+  return best;
+}
+
+function sseDelimiterLength(
+  value: string,
+  index: number
+): number {
+  if (
+    value.startsWith(
+      "\r\n\r\n",
+      index
+    )
+  ) {
+    return 4;
+  }
+
+  if (
+    value.startsWith(
+      "\n\n",
+      index
+    )
+  ) {
+    return 2;
+  }
+
+  return 2;
+}
+
 function validateBody(
   body: unknown
 ):
   | { ok: true }
-  | {
-      ok: false;
-      reason: string;
-    } {
+  | { ok: false; reason: string } {
   if (
     !body ||
     typeof body !== "object"
@@ -428,8 +448,7 @@ function validateBody(
   }
 
   const messages =
-    (body as ChatRequestBody)
-      .messages;
+    (body as ChatRequestBody).messages;
 
   if (
     !Array.isArray(messages) ||
@@ -443,8 +462,7 @@ function validateBody(
   }
 
   if (
-    messages.length >
-    MAX_HISTORY
+    messages.length > MAX_HISTORY
   ) {
     return {
       ok: false,
@@ -453,15 +471,15 @@ function validateBody(
     };
   }
 
-  for (const m of messages) {
+  for (const message of messages) {
     if (
-      !m ||
-      typeof m !== "object" ||
-      (m.role !== "user" &&
-        m.role !== "assistant") ||
-      typeof m.content !==
+      !message ||
+      typeof message !== "object" ||
+      (message.role !== "user" &&
+        message.role !== "assistant") ||
+      typeof message.content !==
         "string" ||
-      m.content.trim()
+      message.content.trim()
         .length === 0
     ) {
       return {
@@ -472,7 +490,7 @@ function validateBody(
     }
 
     if (
-      m.content.length >
+      message.content.length >
       MAX_MESSAGE_LENGTH
     ) {
       return {
@@ -488,14 +506,6 @@ function validateBody(
   };
 }
 
-/**
- * Pulls all text from:
- *
- * candidates[0]
- *   .content
- *   .parts[]
- *   .text
- */
 function extractDeltaText(
   data: unknown
 ): string | null {
@@ -537,16 +547,12 @@ function extractDeltaText(
   }
 
   const text = parts
-    .map(
-      (part) =>
-        part?.text
-    )
+    .map((part) => part?.text)
     .filter(
       (
-        text
-      ): text is string =>
-        typeof text ===
-        "string"
+        value
+      ): value is string =>
+        typeof value === "string"
     )
     .join("");
 
@@ -565,17 +571,15 @@ function getBlockReason(
     return null;
   }
 
-  const feedback =
-    (
-      data as {
-        promptFeedback?: {
-          blockReason?: unknown;
-        };
-      }
-    ).promptFeedback;
+  const feedback = (
+    data as {
+      promptFeedback?: {
+        blockReason?: unknown;
+      };
+    }
+  ).promptFeedback;
 
-  return typeof feedback
-    ?.blockReason ===
+  return typeof feedback?.blockReason ===
     "string"
     ? feedback.blockReason
     : null;
@@ -686,10 +690,10 @@ function getProviderErrorMessage(
 }
 
 async function safeReadText(
-  res: Response
+  response: Response
 ): Promise<string> {
   try {
-    return await res.text();
+    return await response.text();
   } catch {
     return "<unreadable response body>";
   }
@@ -705,6 +709,8 @@ function errorResponse(
 
   return NextResponse.json(
     body,
-    { status }
+    {
+      status,
+    }
   );
-                   }
+              }
