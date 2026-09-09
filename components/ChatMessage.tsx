@@ -10,28 +10,23 @@ export default function ChatMessage({ message }: ChatMessageProps) {
 
   return (
     <div
-      className={`msg-in flex w-full gap-2.5 ${
-        isAanya ? "justify-start" : "justify-end"
-      }`}
+      className={`flex w-full gap-2.5 ${isAanya ? "justify-start" : "justify-end"}`}
     >
       {isAanya && (
-        <span className="mt-1 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full border border-[var(--gold-soft)] bg-[var(--surface-raised)] shadow-[0_0_10px_rgba(232,184,92,0.15)]">
-          <Image
-            src="/aanya/avatar.svg"
-            alt="Aanya"
-            width={22}
-            height={22}
-            className="h-[22px] w-[22px] rounded-full"
-          />
-        </span>
+        <Image
+          src="/aanya/avatar.svg"
+          alt="Aanya"
+          width={30}
+          height={30}
+          className="mt-1 h-[30px] w-[30px] shrink-0 rounded-full"
+        />
       )}
-
       <div
         className={[
-          "max-w-[82%] whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed backdrop-blur-sm sm:max-w-[70%]",
+          "max-w-[82%] whitespace-pre-wrap break-words rounded-2xl px-4 py-2.5 text-[15px] leading-relaxed sm:max-w-[70%]",
           isAanya
-            ? "rounded-tl-sm border border-[var(--border-soft)] bg-[var(--surface-raised)]/90 text-[var(--text)]"
-            : "rounded-tr-sm border border-[var(--user-bubble-border)] bg-[var(--user-bubble)] text-[var(--text)]",
+            ? "rounded-tl-sm border border-[var(--border)] bg-[var(--surface-raised)] text-[var(--text)]"
+            : "rounded-tr-sm bg-[var(--user-bubble)] text-[var(--text)]",
         ].join(" ")}
       >
         {message.content}
