@@ -1,20 +1,24 @@
-# dependencies
-node_modules
-
-# env
-.env
-.env.local
-.env.*.local
-
-# next.js
-.next
-out
-
-# misc
-.DS_Store
-*.pem
-npm-debug.log*
-
-# typescript
+# Dependencies and generated output
+node_modules/
+dist/
+.next/
+out/
+coverage/
+.vite/
 *.tsbuildinfo
-next-env.d.ts
+
+# Secrets: examples are the only exception
+.env
+.env.*
+!.env.example
+!.env.local.example
+*.pem
+*.key
+
+# Local tooling and logs
+.DS_Store
+Thumbs.db
+*.log
+.vercel/
+.idea/
+.vscode/
